@@ -35,8 +35,12 @@
     const ctx = canvas.getContext('2d');
 
     // Game states
-    const STATE = { MENU: 0, PLAYING: 1, TRANSITION: 2, GAMEOVER: 3, PAUSED: 4, SETTINGS: 5, LOBBY: 6 };
+    const STATE = { MENU: 0, PLAYING: 1, TRANSITION: 2, GAMEOVER: 3, PAUSED: 4, SETTINGS: 5, LOBBY: 6, NETWORK: 7 };
     let gameState = STATE.MENU;
+    let gameMode = 'single'; // 'single' | 'coop' | 'network'
+    let networkRole = 'offline'; // 'host' | 'client' | 'offline'
+    let menuSelection = 0;
+    const menuOptions = ['单人游戏', '双人同屏', '网络对战'];
     let lastTime = 0;
     let gameTime = 0;
     let graze = 0;
@@ -199,24 +203,50 @@
     }
 
     // ============ PLAYER ============
-    const player = {
-      x: canvas.width / 2,
-      y: canvas.height - 80,
-      w: 24,
-      h: 32,
-      r: 12,
-      speed: 200,
-      shootCooldown: 0,
-      shootRate: 0.2,
-      invincible: 0,
-      lives: 3,
-      score: 0,
-      power: 0,
-      maxPower: 4,
-      grazeTime: 0,
-      bombCooldown: 0,
-      bombReady: true
-    };
+    const players = [
+      {
+        x: canvas.width / 2 - 30,
+        y: canvas.height - 80,
+        w: 24,
+        h: 32,
+        r: 12,
+        speed: 200,
+        shootCooldown: 0,
+        shootRate: 0.2,
+        invincible: 0,
+        lives: 3,
+        score: 0,
+        power: 0,
+        maxPower: 4,
+        grazeTime: 0,
+        bombCooldown: 0,
+        bombReady: true,
+        color: '#00ffff'
+      },
+      {
+        x: canvas.width / 2 + 30,
+        y: canvas.height - 80,
+        w: 24,
+        h: 32,
+        r: 12,
+        speed: 200,
+        shootCooldown: 0,
+        shootRate: 0.2,
+        invincible: 0,
+        lives: 3,
+        score: 0,
+        power: 0,
+        maxPower: 4,
+        grazeTime: 0,
+        bombCooldown: 0,
+        bombReady: true,
+        color: '#ff8800',
+        active: false
+      }
+    ];
+
+    // Backward compatibility - reference to first player
+    const player = players[0];
 
     const BOMB_COOLDOWN = 60; // 60 seconds
 
@@ -446,33 +476,94 @@
     }
 
     function updatePlayer(dt) {
+      // Update player 1 (WASD)
+      updatePlayer1(dt);
+
+      // Update player 2 (arrows) if coop mode and active
+      if (gameMode === 'coop' && players[1].active) {
+        updatePlayer2(dt);
+      }
+    }
+
+    function updatePlayer1(dt) {
+      const p = players[0];
       // Apply black hole gravity
       if (boss.blackHoleActive) {
-        const dx = boss.x - player.x;
-        const dy = boss.y - player.y;
+        const dx = boss.x - p.x;
+        const dy = boss.y - p.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
         if (dist > 20) {
-          player.x += (dx / dist) * 100 * dt;
-          player.y += (dy / dist) * 100 * dt;
+          p.x += (dx / dist) * 100 * dt;
+          p.y += (dy / dist) * 100 * dt;
         }
       }
 
       // Apply white hole repulsion
       if (boss.whiteHoleActive) {
-        const dx = player.x - boss.x;
-        const dy = player.y - boss.y;
+        const dx = p.x - boss.x;
+        const dy = p.y - boss.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
         if (dist < 300) {
-          player.x += (dx / dist) * 150 * dt;
-          player.y += (dy / dist) * 150 * dt;
+          p.x += (dx / dist) * 150 * dt;
+          p.y += (dy / dist) * 150 * dt;
         }
       }
 
-      // Movement - keyboard
-      if (isDown('ArrowLeft') || isDown('a')) player.x -= player.speed * dt;
-      if (isDown('ArrowRight') || isDown('d')) player.x += player.speed * dt;
-      if (isDown('ArrowUp') || isDown('w')) player.y -= player.speed * dt;
-      if (isDown('ArrowDown') || isDown('s')) player.y += player.speed * dt;
+      // Movement - WASD
+      if (isDown('a') || isDown('A')) p.x -= p.speed * dt;
+      if (isDown('d') || isDown('D')) p.x += p.speed * dt;
+      if (isDown('w') || isDown('W')) p.y -= p.speed * dt;
+      if (isDown('s') || isDown('S')) p.y += p.speed * dt;
+
+      // Clamp to bounds
+      p.x = Math.max(p.w/2, Math.min(canvas.width - p.w/2, p.x));
+      p.y = Math.max(p.h/2, Math.min(canvas.height - p.h/2, p.y));
+
+      // Auto-fire
+      p.shootCooldown -= dt;
+      if (p.shootCooldown <= 0) {
+        shootBullet(p.x, p.y - 16, -400, 'player');
+        if (p.power >= 1) {
+          shootBullet(p.x - 8, p.y - 12, -380, 'player');
+          shootBullet(p.x + 8, p.y - 12, -380, 'player');
+        }
+        if (p.power >= 3) {
+          shootBullet(p.x - 16, p.y - 8, -360, 'player');
+          shootBullet(p.x + 16, p.y - 8, -360, 'player');
+        }
+        p.shootCooldown = p.shootRate;
+      }
+
+      if (p.invincible > 0) p.invincible -= dt;
+    }
+
+    function updatePlayer2(dt) {
+      const p = players[1];
+      if (!p.active) return;
+
+      // Movement - Arrow keys
+      if (isDown('ArrowLeft')) p.x -= p.speed * dt;
+      if (isDown('ArrowRight')) p.x += p.speed * dt;
+      if (isDown('ArrowUp')) p.y -= p.speed * dt;
+      if (isDown('ArrowDown')) p.y += p.speed * dt;
+
+      // Clamp to bounds
+      p.x = Math.max(p.w/2, Math.min(canvas.width - p.w/2, p.x));
+      p.y = Math.max(p.h/2, Math.min(canvas.height - p.h/2, p.y));
+
+      // Auto-fire
+      p.shootCooldown -= dt;
+      if (p.shootCooldown <= 0) {
+        shootBullet(p.x, p.y - 16, -400, 'player');
+        if (p.power >= 1) {
+          shootBullet(p.x - 8, p.y - 12, -380, 'player');
+          shootBullet(p.x + 8, p.y - 12, -380, 'player');
+        }
+        p.shootCooldown = p.shootRate;
+      }
+
+      if (p.invincible > 0) p.invincible -= dt;
+    }
 
       // Movement - touch
       const touch = getTouchInput();
@@ -2794,15 +2885,27 @@
       ctx.fillText(`HI ${hiScore}`, 20, 70);
       ctx.restore();
 
-      // === LIVES (Top Right) ===
+      // === LIVES ===
       ctx.save();
-      ctx.textAlign = 'right';
       ctx.font = '16px "Courier New", monospace';
-      for (let i = 0; i < player.lives; i++) {
-        ctx.fillStyle = i === player.lives - 1 ? '#ff4444' : '#ff6666';
+
+      // Player 1 lives (top left)
+      for (let i = 0; i < players[0].lives; i++) {
+        ctx.fillStyle = '#00ffff';
         ctx.shadowBlur = 10;
-        ctx.shadowColor = '#ff4444';
-        ctx.fillText('❤', canvas.width - 20 - i * 20, 30);
+        ctx.shadowColor = '#00ffff';
+        ctx.fillText('❤', 60 - i * 20, 30);
+      }
+
+      // Player 2 lives (top right, coop mode only)
+      if (gameMode === 'coop' && players[1].active) {
+        ctx.textAlign = 'right';
+        for (let i = 0; i < players[1].lives; i++) {
+          ctx.fillStyle = '#ff8800';
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = '#ff8800';
+          ctx.fillText('❤', canvas.width - 60 + i * 20, 30);
+        }
       }
       ctx.restore();
 
@@ -3698,8 +3801,31 @@
         currentPage = currentPage === 'MENU' ? 'LEADERBOARD' : 'MENU';
       }
 
+      // Menu selection navigation
+      if (isDown('ArrowUp') && !keys['ArrowUp_pressed']) {
+        keys['ArrowUp_pressed'] = true;
+        menuSelection = (menuSelection - 1 + menuOptions.length) % menuOptions.length;
+      }
+      if (isDown('ArrowDown') && !keys['ArrowDown_pressed']) {
+        keys['ArrowDown_pressed'] = true;
+        menuSelection = (menuSelection + 1) % menuOptions.length;
+      }
+      // Reset pressed flags
+      if (!isDown('ArrowUp')) keys['ArrowUp_pressed'] = false;
+      if (!isDown('ArrowDown')) keys['ArrowDown_pressed'] = false;
+
+      // Confirm selection
       if (isDown(' ') || isDown('Enter')) {
-        startGame();
+        if (menuSelection === 0) { // 单人游戏
+          gameMode = 'single';
+          startGame();
+        } else if (menuSelection === 1) { // 双人同屏
+          gameMode = 'coop';
+          startGame();
+        } else if (menuSelection === 2) { // 网络对战
+          gameMode = 'network';
+          gameState = STATE.LOBBY;
+        }
       }
     }
 
@@ -3774,12 +3900,24 @@
       combo = 0;
       gameTime = 0;
       displayHp = 100;
-      player.lives = 3;
-      player.power = 0;
-      player.x = canvas.width / 2;
-      player.y = canvas.height - 80;
-      player.bombReady = true;
-      player.bombCooldown = 0;
+
+      // Reset both players
+      for (const p of players) {
+        p.lives = 3;
+        p.power = 0;
+        p.x = canvas.width / 2;
+        p.y = canvas.height - 80;
+        p.bombReady = true;
+        p.bombCooldown = 0;
+      }
+
+      // Activate player 2 in coop mode
+      if (gameMode === 'coop') {
+        players[1].active = true;
+        players[1].x = canvas.width / 2 + 30;
+        players[0].x = canvas.width / 2 - 30;
+      }
+
       powerups.length = 0;
       minions.length = 0;
       bossIndex = 0;
@@ -3819,6 +3957,14 @@
         ctx.fillStyle = '#00ffff';
         ctx.font = '16px monospace';
         ctx.fillText('PRESS SPACE TO START', canvas.width/2, canvas.height/2 + 40);
+      }
+
+      // Menu options
+      ctx.font = '14px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      for (let i = 0; i < menuOptions.length; i++) {
+        ctx.fillStyle = i === menuSelection ? '#00ffff' : '#444444';
+        ctx.fillText(menuOptions[i], canvas.width / 2, 280 + i * 30);
       }
 
       // Left sidebar game tips - clean vertical layout
