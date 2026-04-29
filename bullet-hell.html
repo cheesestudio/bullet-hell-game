@@ -54,6 +54,12 @@
     let bossHealthBar = 0;
     let bossMaxHealth = 100;
 
+    // Screen rotation for PHANTOM boss
+    let screenRotation = 0;
+    let screenRotationTarget = 0;
+    let screenRotationActive = false;
+    const screenRotationSpeed = 60; // degrees per second
+
     // Network multiplayer
     const NET_PORT = 7;
     const MAX_PLAYERS = 4;
@@ -870,7 +876,13 @@
         blackHole: 0,
         whiteHole: 0,
         laser: 0,
-        phantom: 0
+        phantom: 0,
+        // PHANTOM new abilities
+        ghostDash: 0,
+        shadowRealm: 0,
+        phantomTrail: 0,
+        phaseSplit: 0,
+        screenRotate: 0
       },
       shieldHp: 0,
       clones: [],
@@ -887,6 +899,10 @@
     // Boss entrance particles
     const entranceParticles = [];
 
+    // PHANTOM ability arrays
+    const shadowRealms = [];
+    const phaseSplits = [];
+
     const BOSS_PHASES = [
       // VOID - Phase 1
       { name: 'VOID', hp: 100, color: '#ff00ff', pattern: 'laser' },
@@ -899,13 +915,18 @@
       // CORE - Phase 3
       { name: 'CORE', hp: 150, color: '#ff8800', pattern: 'beam' },
       { name: 'CORE', hp: 150, color: '#ff8800', pattern: 'homing' },
-      { name: 'CORE', hp: 150, color: '#ff8800', pattern: 'rain' }
+      { name: 'CORE', hp: 150, color: '#ff8800', pattern: 'rain' },
+      // PHANTOM - Phase 4
+      { name: 'PHANTOM', hp: 150, color: '#8844ff', pattern: 'phantom_trail' },
+      { name: 'PHANTOM', hp: 200, color: '#8844ff', pattern: 'encircle' },
+      { name: 'PHANTOM', hp: 300, color: '#8844ff', pattern: 'spiral' }
     ];
 
     const BOSS_PATTERNS = [
       'laser', 'ring', 'spiral', 'wave', 'wall', 'scatter', 'beam', 'homing', 'rain',
       'double_spiral', 'flower', 'cross', 'snake', 'pulse', 'vortex', 'burst', 'helix', 'galaxy', 'chaos',
-      'corridor', 'pincer', 'predict', 'helix_spread'
+      'corridor', 'pincer', 'predict', 'helix_spread',
+      'phantom_trail', 'encircle', 'spiral'
     ];
     const BOSS_COLORS = [
       '#ff00ff', '#00ff00', '#ff8800', '#00ffff', '#ff4444', '#ffff00',
@@ -926,7 +947,13 @@
       BLACK_HOLE: { cooldown: 30, triggerHp: 0.3, name: 'BLACK_HOLE' },
       WHITE_HOLE: { cooldown: 25, triggerHp: 0.35, name: 'WHITE_HOLE' },
       LASER: { cooldown: 20, triggerHp: 0.25, name: 'LASER' },
-      PHANTOM: { cooldown: 15, triggerHp: 0.2, name: 'PHANTOM' }
+      PHANTOM: { cooldown: 15, triggerHp: 0.2, name: 'PHANTOM' },
+      // PHANTOM new abilities
+      GHOST_DASH: { cooldown: 15, triggerHp: 0.8, name: 'GHOST_DASH' },
+      SHADOW_REALM: { cooldown: 25, triggerHp: 0.7, name: 'SHADOW_REALM' },
+      PHANTOM_TRAIL: { cooldown: 20, triggerHp: 0.5, name: 'PHANTOM_TRAIL' },
+      PHASE_SPLIT: { cooldown: 30, triggerHp: 0.4, name: 'PHASE_SPLIT' },
+      SCREEN_ROTATE: { cooldown: 25, triggerHp: 0.3, name: 'SCREEN_ROTATE' }
     };
 
     let bossIndex = 0;
@@ -1119,7 +1146,35 @@
         }
       }
 
-      const availableAbilities = Math.floor(waveDifficulty * 10) + 3;
+      const availableAbilities = Math.floor(waveDifficulty * 10) + 5;
+
+      // PHANTOM new abilities (only when boss is PHANTOM)
+      if (boss.name === 'PHANTOM') {
+        // GHOST_DASH - HP < 80%
+        if (hpPercent < 0.8 && boss.abilityCooldowns.ghostDash <= 0) {
+          triggerGhostDash();
+          boss.abilityCooldowns.ghostDash = 15;
+        }
+        // SHADOW_REALM - HP < 70%
+        if (hpPercent < 0.7 && boss.abilityCooldowns.shadowRealm <= 0) {
+          triggerShadowRealm();
+          boss.abilityCooldowns.shadowRealm = 25;
+        }
+        // PHANTOM_TRAIL - HP < 50%
+        if (hpPercent < 0.5 && boss.abilityCooldowns.phantomTrail <= 0) {
+          boss.abilityCooldowns.phantomTrail = 20;
+        }
+        // PHASE_SPLIT - HP < 40%
+        if (hpPercent < 0.4 && boss.abilityCooldowns.phaseSplit <= 0) {
+          triggerPhaseSplit();
+          boss.abilityCooldowns.phaseSplit = 30;
+        }
+        // SCREEN_ROTATE - HP < 30% or HP < 20%
+        if ((hpPercent < 0.3 || hpPercent < 0.2) && boss.abilityCooldowns.screenRotate <= 0) {
+          triggerScreenRotate();
+          boss.abilityCooldowns.screenRotate = 25;
+        }
+      }
 
       // 1. TELEPORT - HP < 80%
       if (hpPercent < 0.8 && boss.abilityCooldowns.teleport <= 0 && availableAbilities >= 1) {
@@ -1330,6 +1385,51 @@
         });
       }, 500);
       safeTimeout(() => { boss.phantomTankActive = false; }, 3000);
+    }
+
+    function triggerScreenRotate() {
+      if (screenRotationActive) return;
+      screenRotationActive = true;
+      screenRotation = 0;
+      screenRotationTarget = 360;
+      triggerScreenShake(5, 0.3);
+    }
+
+    function triggerShadowRealm() {
+      if (shadowRealms.length >= 3) return;
+      // 创建3个虚影
+      for (let i = 0; i < 3; i++) {
+        shadowRealms.push({
+          x: boss.x + (Math.random() - 0.5) * 100,
+          y: boss.y + (Math.random() - 0.5) * 50,
+          life: 5,
+          maxLife: 5
+        });
+      }
+    }
+
+    function triggerGhostDash() {
+      boss.x = player.x + (Math.random() - 0.5) * 100;
+      boss.y = Math.min(player.y + 50, canvas.height - 100);
+      triggerScreenShake(3, 0.1);
+    }
+
+    function triggerPhaseSplit() {
+      if (phaseSplits.length >= 3) return;
+      clearAllTimers();
+      for (let i = 0; i < 3; i++) {
+        phaseSplits.push({
+          x: boss.x + (i - 1) * 80,
+          y: boss.y,
+          targetX: boss.x + (i - 1) * 100,
+          life: 6,
+          maxLife: 6,
+          color: boss.color
+        });
+      }
+      safeTimeout(() => {
+        phaseSplits.length = 0;
+      }, 6000);
     }
 
     function renderBoss() {
@@ -2437,6 +2537,64 @@
           });
         }
       }
+      // PHANTOM new patterns
+      else if (p === 'phantom_trail') {
+        // 3发一组的追踪弹
+        for (let i = 0; i < 3; i++) {
+          const angle = Math.atan2(player.y - boss.y, player.x - boss.x) + (i - 1) * 0.15;
+          bullets.push({
+            x: boss.x,
+            y: boss.y,
+            vx: Math.cos(angle) * 80,
+            vy: Math.sin(angle) * 80,
+            r: 5,
+            owner: 'boss',
+            color: '#8844ff',
+            alpha: 0.6,
+            tracking: true
+          });
+        }
+      }
+      else if (p === 'encircle') {
+        // 环形包围弹幕
+        for (let i = 0; i < 16; i++) {
+          const angle = (i / 16) * Math.PI * 2;
+          bullets.push({
+            x: boss.x + Math.cos(angle) * 50,
+            y: boss.y + Math.sin(angle) * 50,
+            vx: Math.cos(angle) * 100,
+            vy: Math.sin(angle) * 100,
+            r: 5,
+            owner: 'boss',
+            color: '#8844ff'
+          });
+        }
+      }
+      else if (p === 'spiral') {
+        // 螺旋聚集 - 从四角向中心
+        const corners = [
+          {x: -20, y: -20},
+          {x: canvas.width + 20, y: -20},
+          {x: canvas.width + 20, y: canvas.height + 20},
+          {x: -20, y: canvas.height + 20}
+        ];
+        const i = Math.floor(Date.now() / 100) % 4;
+        const corner = corners[i];
+        for (let j = 0; j < 3; j++) {
+          const angle = Date.now() / 300 + j;
+          const targetX = boss.x + Math.cos(angle) * 20;
+          const targetY = boss.y + Math.sin(angle) * 20;
+          bullets.push({
+            x: corner.x,
+            y: corner.y,
+            vx: (targetX - corner.x) * 2,
+            vy: (targetY - corner.y) * 2,
+            r: 4,
+            owner: 'boss',
+            color: '#aa66ff'
+          });
+        }
+      }
 
       // Spawn minions for certain patterns
       if (['double_spiral', 'flower', 'vortex', 'galaxy'].includes(p)) {
@@ -2589,6 +2747,12 @@
             const dropCount = Math.min(1 + Math.floor(waveCount / 3), 6);
             for (let i = 0; i < dropCount; i++) {
               spawnPowerup(boss.x + (Math.random() - 0.5) * 80, boss.y + (Math.random() - 0.5) * 60);
+            }
+            // PHANTOM Phase 3 extra drops
+            if (boss.name === 'PHANTOM' && boss.phase === 2) {
+              for (let i = 0; i < 2; i++) {
+                spawnPowerup(boss.x + (Math.random() - 0.5) * 80, boss.y, {name: 'POWER', color: '#ff0066'});
+              }
             }
             score += 1000;
             spawnScorePopup(boss.x, boss.y - 30, 1000);
@@ -3083,6 +3247,22 @@
       if (screenFlash.intensity > 0) {
         screenFlash.intensity -= dt * 3;
         if (screenFlash.intensity < 0) screenFlash.intensity = 0;
+      }
+    }
+
+    function updateScreenRotation(dt) {
+      if (screenRotationActive) {
+        if (screenRotation < 360) {
+          screenRotation += screenRotationSpeed * dt;
+          if (screenRotation >= 360) {
+            screenRotation = 360;
+            screenRotationTarget = 0;
+          }
+        } else if (screenRotationTarget === 0 && screenRotation > 0) {
+          screenRotation -= screenRotationSpeed * dt;
+          if (screenRotation < 0) screenRotation = 0;
+        }
+        if (screenRotation === 0) screenRotationActive = false;
       }
     }
 
@@ -3869,6 +4049,7 @@
       updateScreenShake(dt);
       updateScreenFlash(dt);
       updateBombSlash(dt);
+      updateScreenRotation(dt);
       updatePlayer(dt);
       updateRegen(dt);
       updateBullets(dt);
@@ -3893,6 +4074,13 @@
     function render() {
       ctx.save();
       ctx.translate(screenShake.x, screenShake.y);
+
+      // Apply screen rotation for PHANTOM boss
+      if (screenRotation > 0) {
+        ctx.translate(canvas.width/2, canvas.height/2);
+        ctx.rotate(screenRotation * Math.PI / 180);
+        ctx.translate(-canvas.width/2, -canvas.height/2);
+      }
 
       ctx.fillStyle = '#0a0a1a';
       ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
