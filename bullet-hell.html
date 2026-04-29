@@ -4457,7 +4457,7 @@
     gameLoop = function(dt) {
       coyoteUpdate(dt);
       originalGameLoop(dt);
-    }
+    };
 
     requestAnimationFrame(gameLoop);
 
@@ -4467,7 +4467,7 @@
       canvas.style.display = 'none';
       canvas.offsetHeight; // Trigger reflow
       canvas.style.display = 'block';
-    }
+    };
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleResize);
