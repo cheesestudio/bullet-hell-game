@@ -41,6 +41,7 @@
     let networkRole = 'offline'; // 'host' | 'client' | 'offline'
     let menuSelection = 0;
     const menuOptions = ['单人游戏', '双人同屏', '网络对战'];
+    let menuPhase = 'title'; // 'title' = press any key, 'select' = show options
     let lastTime = 0;
     let gameTime = 0;
     let graze = 0;
@@ -65,19 +66,176 @@
     const screenRotationSpeed = 60; // degrees per second
 
     // Network multiplayer
-    const NET_PORT = 7;
+    const WS_PORT = 8007;
     const MAX_PLAYERS = 4;
+    const TICK_RATE = 1 / 60;
     const network = {
       mode: 'offline', // offline / host / client
       connected: false,
-      peers: [],
       localPlayerId: 0,
+      playerCount: 1,
       tick: 0,
-      confirmedTicks: 0,
-      inputQueue: new Map(),
-      readyPlayers: new Set(),
+      accumulator: 0,
+      remoteInputs: {},    // playerId -> latest input bitmask
+      lastKnownInput: {},  // playerId -> last known input
       ws: null
     };
+
+    // Seeded PRNG for deterministic network play (mulberry32)
+    function mulberry32(seed) {
+      return function() {
+        seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+        let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    let gameRng = null;
+    function gameRandom() {
+      return gameRng ? gameRng() : Math.random();
+    }
+
+    // Network input encoding
+    const playerInputs = [
+      { up: false, down: false, left: false, right: false, bomb: false },
+      { up: false, down: false, left: false, right: false, bomb: false },
+      { up: false, down: false, left: false, right: false, bomb: false },
+      { up: false, down: false, left: false, right: false, bomb: false }
+    ];
+
+    // Network input encoding - merges WASD+Arrow keys intentionally.
+    // In network mode, each client is on a separate machine so either key set works.
+    // In coop mode, this function is NOT used (P1/P2 have separate update functions).
+    function encodeInput() {
+      let bits = 0;
+      if (isDown('a') || isDown('A') || isDown('ArrowLeft')) bits |= 1;
+      if (isDown('d') || isDown('D') || isDown('ArrowRight')) bits |= 2;
+      if (isDown('w') || isDown('W') || isDown('ArrowUp')) bits |= 4;
+      if (isDown('s') || isDown('S') || isDown('ArrowDown')) bits |= 8;
+      if (isDown(' ') || isDown('b') || isDown('B')) bits |= 16;
+      return bits;
+    }
+
+    function decodeInput(bits) {
+      return {
+        left: !!(bits & 1),
+        right: !!(bits & 2),
+        up: !!(bits & 4),
+        down: !!(bits & 8),
+        bomb: !!(bits & 16)
+      };
+    }
+
+    // Lobby state
+    let lobbySubState = 'choose'; // choose / hosting / inputIp / connected
+    let lobbySelection = 0;
+    let hostIpInput = '';
+    let lobbyPlayers = [];
+    let lobbyError = '';
+    let lobbyStatusMsg = '';
+
+    // Network functions
+    function netConnect(ip) {
+      lobbyError = '';
+      lobbyStatusMsg = '连接中...';
+      try {
+        network.ws = new WebSocket('ws://' + ip + ':' + WS_PORT);
+      } catch(e) {
+        lobbyError = '连接失败: ' + e.message;
+        return;
+      }
+      network.ws.onopen = () => {
+        network.connected = true;
+        lobbyStatusMsg = '已连接，等待服务器分配...';
+      };
+      network.ws.onmessage = (e) => {
+        try { handleNetMessage(JSON.parse(e.data)); } catch(err) {}
+      };
+      network.ws.onclose = () => {
+        network.connected = false;
+        network.ws = null;
+        if (gameState === STATE.PLAYING) {
+          gameState = STATE.MENU;
+          menuPhase = 'select';
+          network.mode = 'offline';
+        }
+        if (gameState === STATE.LOBBY) {
+          lobbyError = '连接已断开';
+          lobbySubState = 'choose';
+          network.mode = 'offline';
+        }
+      };
+      network.ws.onerror = () => {
+        lobbyError = '连接失败，请检查IP和中继服务器';
+        lobbySubState = lobbySubState === 'hosting' ? 'choose' : 'inputIp';
+      };
+    }
+
+    function netSend(msg) {
+      if (network.ws && network.ws.readyState === 1) {
+        network.ws.send(JSON.stringify(msg));
+      }
+    }
+
+    function netDisconnect() {
+      if (network.ws) { network.ws.close(); network.ws = null; }
+      network.mode = 'offline';
+      network.connected = false;
+      lobbyPlayers = [];
+    }
+
+    function handleNetMessage(msg) {
+      switch(msg.t) {
+        case 'welcome':
+          network.localPlayerId = msg.id;
+          network.mode = msg.host ? 'host' : 'client';
+          lobbyPlayers = msg.players;
+          lobbySubState = msg.host ? 'hosting' : 'connected';
+          lobbyStatusMsg = msg.host ? '你是房主' : '已加入房间';
+          lobbyError = '';
+          break;
+        case 'joined':
+          lobbyPlayers.push({ id: msg.id, ready: false });
+          break;
+        case 'left':
+          lobbyPlayers = lobbyPlayers.filter(p => p.id !== msg.id);
+          if (gameState === STATE.PLAYING && msg.id < players.length) {
+            players[msg.id].active = false;
+          }
+          break;
+        case 'ready': {
+          const rp = lobbyPlayers.find(p => p.id === msg.id);
+          if (rp) rp.ready = true;
+          break;
+        }
+        case 'start':
+          gameRng = mulberry32(msg.seed);
+          startNetworkGame(msg.count);
+          break;
+        case 'i':
+          // Remote player input update
+          network.remoteInputs[msg.id] = msg.k;
+          break;
+      }
+    }
+
+    function startNetworkGame(playerCount) {
+      network.playerCount = playerCount;
+      network.tick = 0;
+      network.accumulator = 0;
+      network.remoteInputs = {};
+      network.lastKnownInput = {};
+      startGame();
+      // Activate network players
+      for (let i = 0; i < MAX_PLAYERS; i++) {
+        players[i].active = (i < playerCount);
+      }
+      // Spread players across screen
+      for (let i = 0; i < playerCount; i++) {
+        players[i].x = canvas.width / (playerCount + 1) * (i + 1);
+        players[i].y = canvas.height - 80;
+      }
+    }
 
     function gameLoop(timestamp) {
       const dt = (timestamp - lastTime) / 1000;
@@ -88,10 +246,37 @@
       // Update
       switch(gameState) {
         case STATE.PLAYING:
-          // Lockstep sync: only advance when we have all player inputs for this tick
-          if (network.mode === 'offline' || network.confirmedTicks >= network.tick) {
+          if (gameMode !== 'network') {
+            // Single / coop: variable timestep
             update(clampedDt);
-            network.tick++;
+          } else {
+            // Network mode: fixed timestep for deterministic sync
+            network.accumulator += clampedDt;
+            // Send local input every frame
+            const localBits = encodeInput();
+            netSend({ t: 'i', k: localBits });
+            // Apply inputs: local + remote
+            playerInputs[network.localPlayerId] = decodeInput(localBits);
+            for (let i = 0; i < network.playerCount; i++) {
+              if (i !== network.localPlayerId) {
+                const remoteBits = network.remoteInputs[i];
+                if (remoteBits !== undefined) {
+                  playerInputs[i] = decodeInput(remoteBits);
+                  network.lastKnownInput[i] = remoteBits;
+                } else {
+                  playerInputs[i] = decodeInput(network.lastKnownInput[i] || 0);
+                }
+              }
+            }
+            // Step fixed ticks (allow up to 3 catch-up steps)
+            let steps = 0;
+            while (network.accumulator >= TICK_RATE && steps < 3) {
+              update(TICK_RATE);
+              network.tick++;
+              network.accumulator -= TICK_RATE;
+              steps++;
+            }
+            if (network.accumulator > TICK_RATE * 2) network.accumulator = 0;
           }
           break;
         case STATE.MENU: updateMenu(clampedDt); break;
@@ -130,7 +315,19 @@
 
     // ============ INPUT SYSTEM ============
     const keys = {};
-    window.addEventListener('keydown', e => keys[e.key] = true);
+    window.addEventListener('keydown', e => {
+      keys[e.key] = true;
+      // Lobby IP input handling
+      if (gameState === STATE.LOBBY && lobbySubState === 'inputIp') {
+        if (e.key === 'Backspace') {
+          hostIpInput = hostIpInput.slice(0, -1);
+          e.preventDefault();
+        } else if (e.key.length === 1 && '0123456789.:'.includes(e.key)) {
+          hostIpInput += e.key;
+          e.preventDefault();
+        }
+      }
+    });
     window.addEventListener('keyup', e => {
       keys[e.key] = false;
       if (e.key === 'Escape') keys['Escape_pressed'] = false;
@@ -156,9 +353,27 @@
       touchY = (touch.clientY - rect.top) * scaleY;
       touching = true;
 
-      // Start game on touch
-      if (gameState === STATE.MENU || gameState === STATE.GAMEOVER) {
-        startGame();
+      // Handle menu touch with phase awareness
+      if (gameState === STATE.MENU) {
+        if (menuPhase === 'title') {
+          menuPhase = 'select';
+          menuSelection = 0;
+        } else {
+          // In select phase, touch confirms current selection
+          if (menuSelection === 0) { gameMode = 'single'; startGame(); }
+          else if (menuSelection === 1) { gameMode = 'coop'; startGame(); }
+          else if (menuSelection === 2) {
+            gameMode = 'network';
+            lobbySubState = 'choose';
+            lobbySelection = 0;
+            lobbyError = '';
+            lobbyPlayers = [];
+            gameState = STATE.LOBBY;
+          }
+        }
+      } else if (gameState === STATE.GAMEOVER) {
+        gameState = STATE.MENU;
+        menuPhase = 'select';
       }
       // Activate bomb on double tap
       if (gameState === STATE.PLAYING && player.bombReady) {
@@ -170,7 +385,10 @@
       player.bombReady = false;
       player.bombCooldown = BOMB_COOLDOWN;
       player.invincible = 3;
-      bullets.length = 0;
+      // Only clear enemy bullets, keep player bullets
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        if (bullets[i].owner !== 'player') bullets.splice(i, 1);
+      }
       activateBombSlash();
       if (boss.active) {
         boss.hp -= 50;
@@ -207,46 +425,65 @@
       {
         x: canvas.width / 2 - 30,
         y: canvas.height - 80,
-        w: 24,
-        h: 32,
-        r: 12,
-        speed: 200,
-        shootCooldown: 0,
-        shootRate: 0.2,
-        invincible: 0,
-        lives: 3,
-        score: 0,
-        power: 0,
-        maxPower: 4,
-        grazeTime: 0,
-        bombCooldown: 0,
-        bombReady: true,
-        color: '#00ffff'
+        w: 24, h: 32, r: 12,
+        speed: 200, shootCooldown: 0, shootRate: 0.2,
+        invincible: 0, lives: 3, score: 0,
+        power: 0, maxPower: 4, grazeTime: 0,
+        bombCooldown: 0, bombReady: true,
+        color: '#00ffff', active: true
       },
       {
         x: canvas.width / 2 + 30,
         y: canvas.height - 80,
-        w: 24,
-        h: 32,
-        r: 12,
-        speed: 200,
-        shootCooldown: 0,
-        shootRate: 0.2,
-        invincible: 0,
-        lives: 3,
-        score: 0,
-        power: 0,
-        maxPower: 4,
-        grazeTime: 0,
-        bombCooldown: 0,
-        bombReady: true,
-        color: '#ff8800',
-        active: false
+        w: 24, h: 32, r: 12,
+        speed: 200, shootCooldown: 0, shootRate: 0.2,
+        invincible: 0, lives: 3, score: 0,
+        power: 0, maxPower: 4, grazeTime: 0,
+        bombCooldown: 0, bombReady: true,
+        color: '#ff8800', active: false
+      },
+      {
+        x: canvas.width / 2,
+        y: canvas.height - 80,
+        w: 24, h: 32, r: 12,
+        speed: 200, shootCooldown: 0, shootRate: 0.2,
+        invincible: 0, lives: 3, score: 0,
+        power: 0, maxPower: 4, grazeTime: 0,
+        bombCooldown: 0, bombReady: true,
+        color: '#ff00ff', active: false
+      },
+      {
+        x: canvas.width / 2,
+        y: canvas.height - 80,
+        w: 24, h: 32, r: 12,
+        speed: 200, shootCooldown: 0, shootRate: 0.2,
+        invincible: 0, lives: 3, score: 0,
+        power: 0, maxPower: 4, grazeTime: 0,
+        bombCooldown: 0, bombReady: true,
+        color: '#00ff00', active: false
       }
     ];
 
     // Backward compatibility - reference to first player
     const player = players[0];
+
+    // Get nearest alive active player to a point (for boss targeting, powerup attraction, etc.)
+    function getNearestActivePlayer(x, y) {
+      let nearest = player;
+      let minDist = Infinity;
+      for (let i = 0; i < players.length; i++) {
+        const p = players[i];
+        if (!p.active || p.lives <= 0) continue;
+        const dx = p.x - x;
+        const dy = p.y - y;
+        const dist = dx * dx + dy * dy;
+        if (dist < minDist) {
+          minDist = dist;
+          nearest = p;
+        }
+      }
+      return nearest;
+    }
 
     const BOMB_COOLDOWN = 60; // 60 seconds
 
@@ -263,7 +500,7 @@
 
     function spawnPowerup(x, y) {
       // Weight types based on wave - early game more SCORE/BOMB, later more POWER/SHIELD
-      const rand = Math.random();
+      const rand = gameRandom();
       let type;
       if (waveCount <= 2) {
         // Early: mostly SCORE, some BOMB, rare POWER/SHIELD
@@ -287,7 +524,7 @@
       }
       powerups.push({
         x, y,
-        vx: (Math.random() - 0.5) * 30,
+        vx: (gameRandom() - 0.5) * 30,
         vy: 30,
         r: 8,
         type,
@@ -326,29 +563,30 @@
       }
     }
 
-    function applyPowerup(type) {
-      if (type.name === 'POWER' && player.power < player.maxPower) {
-        player.power = Math.min(player.power + 1, player.maxPower);
-        spawnSparkle(player.x, player.y, '#ff0066');
+    function applyPowerup(type, collector) {
+      if (!collector) collector = player;
+      if (type.name === 'POWER' && collector.power < collector.maxPower) {
+        collector.power = Math.min(collector.power + 1, collector.maxPower);
+        spawnSparkle(collector.x, collector.y, '#ff0066');
         triggerScreenFlash(0.3, '#ff0066');
       } else if (type.name === 'SCORE') {
         score += 500;
-        spawnSparkle(player.x, player.y, '#ffcc00');
+        spawnSparkle(collector.x, collector.y, '#ffcc00');
       } else if (type.name === 'BOMB') {
-        player.lives = Math.min(player.lives + 1, 5);
-        spawnSparkle(player.x, player.y, '#00ff66');
+        collector.lives = Math.min(collector.lives + 1, 5);
+        spawnSparkle(collector.x, collector.y, '#00ff66');
         triggerScreenFlash(0.3, '#00ff66');
       } else if (type.name === 'LIFE') {
-        player.lives = Math.min(player.lives + 1, 5);
-        spawnSparkle(player.x, player.y, '#ff4444');
+        collector.lives = Math.min(collector.lives + 1, 5);
+        spawnSparkle(collector.x, collector.y, '#ff4444');
         triggerScreenFlash(0.5, '#ff4444');
       } else if (type.name === 'SHIELD') {
-        player.invincible = Math.min(player.invincible + 3, 5);
-        spawnSparkle(player.x, player.y, '#00ccff');
+        collector.invincible = Math.min(collector.invincible + 3, 5);
+        spawnSparkle(collector.x, collector.y, '#00ccff');
         triggerScreenFlash(0.3, '#00ccff');
       } else if (type.name === 'RAPID') {
-        player.shootRate = Math.max(0.05, player.shootRate - 0.05);
-        spawnSparkle(player.x, player.y, '#ff6600');
+        collector.shootRate = Math.max(0.05, collector.shootRate - 0.05);
+        spawnSparkle(collector.x, collector.y, '#ff6600');
         triggerScreenFlash(0.2, '#ff6600');
       }
     }
@@ -476,13 +714,85 @@
     }
 
     function updatePlayer(dt) {
-      // Update player 1 (WASD)
-      updatePlayer1(dt);
-
-      // Update player 2 (arrows) if coop mode and active
-      if (gameMode === 'coop' && players[1].active) {
-        updatePlayer2(dt);
+      if (gameMode === 'network') {
+        // Network mode: update all active players using network inputs
+        for (let i = 0; i < network.playerCount; i++) {
+          if (players[i].active) {
+            updateNetworkPlayer(i, dt, playerInputs[i]);
+          }
+        }
+      } else {
+        // Single / coop: original keyboard handling
+        updatePlayer1(dt);
+        if (gameMode === 'coop' && players[1].active) {
+          updatePlayer2(dt);
+        }
       }
+    }
+
+    function updateNetworkPlayer(index, dt, input) {
+      const p = players[index];
+      // Apply black hole gravity
+      if (boss.blackHoleActive) {
+        const dx = boss.x - p.x;
+        const dy = boss.y - p.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 20) {
+          p.x += (dx / dist) * 100 * dt;
+          p.y += (dy / dist) * 100 * dt;
+        }
+      }
+      // Apply white hole repulsion
+      if (boss.whiteHoleActive) {
+        const dx = p.x - boss.x;
+        const dy = p.y - boss.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < 300) {
+          p.x += (dx / dist) * 150 * dt;
+          p.y += (dy / dist) * 150 * dt;
+        }
+      }
+      // Movement from network input
+      if (input.left) p.x -= p.speed * dt;
+      if (input.right) p.x += p.speed * dt;
+      if (input.up) p.y -= p.speed * dt;
+      if (input.down) p.y += p.speed * dt;
+      // Clamp
+      p.x = Math.max(p.w/2, Math.min(canvas.width - p.w/2, p.x));
+      p.y = Math.max(p.h/2, Math.min(canvas.height - p.h/2, p.y));
+      // Auto-fire
+      p.shootCooldown -= dt;
+      if (p.shootCooldown <= 0) {
+        shootBullet(p.x, p.y - 16, -400, 'player');
+        if (p.power >= 1) {
+          shootBullet(p.x - 8, p.y - 12, -380, 'player');
+          shootBullet(p.x + 8, p.y - 12, -380, 'player');
+        }
+        if (p.power >= 3) {
+          shootBullet(p.x - 16, p.y - 8, -360, 'player');
+          shootBullet(p.x + 16, p.y - 8, -360, 'player');
+        }
+        p.shootCooldown = p.shootRate;
+      }
+      if (p.invincible > 0) p.invincible -= dt;
+      // Bomb
+      if (input.bomb && p.bombReady && !p._bombWasDown) {
+        p.bombReady = false;
+        p.bombCooldown = BOMB_COOLDOWN;
+        p.invincible = 3;
+        // Only clear enemy bullets, keep player bullets
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          if (bullets[i].owner !== 'player') bullets.splice(i, 1);
+        }
+        activateBombSlash();
+        if (boss.active) {
+          boss.hp -= 50;
+          score += 50;
+          spawnScorePopup(boss.x, boss.y - 30, 50);
+          triggerScreenShake(6, 0.15);
+        }
+      }
+      p._bombWasDown = input.bomb;
     }
 
     function updatePlayer1(dt) {
@@ -515,6 +825,19 @@
       if (isDown('w') || isDown('W')) p.y -= p.speed * dt;
       if (isDown('s') || isDown('S')) p.y += p.speed * dt;
 
+      // Touch movement
+      const touch = getTouchInput();
+      if (touch) {
+        const dx = touch.x - p.x;
+        const dy = touch.y - p.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 10) {
+          const moveSpeed = p.speed * dt;
+          p.x += (dx / dist) * Math.min(moveSpeed * 2, dist);
+          p.y += (dy / dist) * Math.min(moveSpeed * 2, dist);
+        }
+      }
+
       // Clamp to bounds
       p.x = Math.max(p.w/2, Math.min(canvas.width - p.w/2, p.x));
       p.y = Math.max(p.h/2, Math.min(canvas.height - p.h/2, p.y));
@@ -535,11 +858,48 @@
       }
 
       if (p.invincible > 0) p.invincible -= dt;
+      if (p.grazeTime > 0) p.grazeTime -= dt;
+
+      // Bomb cooldown
+      if (p.bombCooldown > 0) {
+        p.bombCooldown -= dt;
+        if (p.bombCooldown <= 0) {
+          p.bombCooldown = 0;
+          p.bombReady = true;
+        }
+      }
+
+      // Bomb activation (keyboard)
+      if ((isDown(' ') || isDown('Shift')) && p.bombReady && gameState === STATE.PLAYING) {
+        activateBomb();
+      }
     }
 
     function updatePlayer2(dt) {
       const p = players[1];
       if (!p.active) return;
+
+      // Apply black hole gravity
+      if (boss.blackHoleActive) {
+        const dx = boss.x - p.x;
+        const dy = boss.y - p.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > 20) {
+          p.x += (dx / dist) * 100 * dt;
+          p.y += (dy / dist) * 100 * dt;
+        }
+      }
+
+      // Apply white hole repulsion
+      if (boss.whiteHoleActive) {
+        const dx = p.x - boss.x;
+        const dy = p.y - boss.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < 300) {
+          p.x += (dx / dist) * 150 * dt;
+          p.y += (dy / dist) * 150 * dt;
+        }
+      }
 
       // Movement - Arrow keys
       if (isDown('ArrowLeft')) p.x -= p.speed * dt;
@@ -559,69 +919,33 @@
           shootBullet(p.x - 8, p.y - 12, -380, 'player');
           shootBullet(p.x + 8, p.y - 12, -380, 'player');
         }
+        if (p.power >= 3) {
+          shootBullet(p.x - 16, p.y - 8, -360, 'player');
+          shootBullet(p.x + 16, p.y - 8, -360, 'player');
+        }
         p.shootCooldown = p.shootRate;
       }
 
       if (p.invincible > 0) p.invincible -= dt;
-    }
-
-      // Movement - touch
-      const touch = getTouchInput();
-      if (touch) {
-        const dx = touch.x - player.x;
-        const dy = touch.y - player.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        if (dist > 10) {
-          const moveSpeed = player.speed * dt;
-          player.x += (dx / dist) * Math.min(moveSpeed * 2, dist);
-          player.y += (dy / dist) * Math.min(moveSpeed * 2, dist);
-        }
-      }
-
-      // Clamp to bounds
-      player.x = Math.max(player.w/2, Math.min(canvas.width - player.w/2, player.x));
-      player.y = Math.max(player.h/2, Math.min(canvas.height - player.h/2, player.y));
-
-      // Auto-fire
-      player.shootCooldown -= dt;
-      if (player.shootCooldown <= 0) {
-        const bulletSpeed = -400 - player.power * 30;
-        const bulletColor = player.power >= 2 ? '#00ffff' : '#00aaff';
-        shootBullet(player.x, player.y - 16, bulletSpeed, 'player');
-
-        // Extra bullets based on power
-        if (player.power >= 1) {
-          shootBullet(player.x - 8, player.y - 12, bulletSpeed * 0.95, 'player');
-          shootBullet(player.x + 8, player.y - 12, bulletSpeed * 0.95, 'player');
-        }
-        if (player.power >= 3) {
-          shootBullet(player.x - 16, player.y - 8, bulletSpeed * 0.9, 'player');
-          shootBullet(player.x + 16, player.y - 8, bulletSpeed * 0.9, 'player');
-        }
-
-        player.shootCooldown = player.shootRate;
-      }
-
-      // Update graze visual
-      if (player.grazeTime > 0) player.grazeTime -= dt;
-
-      // Invincibility frame
-      if (player.invincible > 0) player.invincible -= dt;
+      if (p.grazeTime > 0) p.grazeTime -= dt;
 
       // Bomb cooldown
-      if (player.bombCooldown > 0) {
-        player.bombCooldown -= dt;
-        if (player.bombCooldown <= 0) {
-          player.bombCooldown = 0;
-          player.bombReady = true;
+      if (p.bombCooldown > 0) {
+        p.bombCooldown -= dt;
+        if (p.bombCooldown <= 0) {
+          p.bombCooldown = 0;
+          p.bombReady = true;
         }
       }
 
-      // Activate bomb
-      if ((isDown(' ') || isDown('Shift')) && player.bombReady && player.bombCooldown <= 0 && gameState === STATE.PLAYING) {
-        player.bombReady = false;
-        player.bombCooldown = BOMB_COOLDOWN;
-        player.invincible = 3;
+      // Bomb activation (P2 uses / key)
+      if (isDown('/') && p.bombReady && gameState === STATE.PLAYING) {
+        p.bombReady = false;
+        p.bombCooldown = BOMB_COOLDOWN;
+        p.invincible = 3;
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          if (bullets[i].owner !== 'player') bullets.splice(i, 1);
+        }
         activateBombSlash();
         if (boss.active) {
           boss.hp -= 50;
@@ -633,30 +957,54 @@
     }
 
     function renderPlayer() {
-      if (player.invincible > 0 && Math.floor(player.invincible * 10) % 2 === 0) return;
+      // Render all active players
+      for (let pi = 0; pi < players.length; pi++) {
+        const p = players[pi];
+        if (!p.active) continue;
+        if (gameMode === 'single' && pi > 0) continue;
+        renderShip(p, pi);
+      }
+    }
+
+    function renderShip(p, index) {
+      if (p.invincible > 0 && Math.floor(p.invincible * 10) % 2 === 0) return;
 
       ctx.save();
-      ctx.translate(player.x, player.y);
+      ctx.translate(p.x, p.y);
 
-      // Subtle tilt based on movement direction
-      const targetTilt = (keys['ArrowLeft'] || keys['a'] || keys['ArrowRight'] || keys['d']) ?
-        ((keys['ArrowLeft'] || keys['a']) ? -0.15 : 0) + ((keys['ArrowRight'] || keys['d']) ? 0.15 : 0) : 0;
-      ctx.rotate(targetTilt + Math.sin(Date.now() / 200) * 0.02);
+      // Subtle tilt based on movement (only for local player in network, or P1/P2 in local)
+      let tilt = Math.sin(Date.now() / 200) * 0.02;
+      if (gameMode === 'network') {
+        const input = playerInputs[index];
+        if (input) {
+          if (input.left) tilt -= 0.15;
+          if (input.right) tilt += 0.15;
+        }
+      } else if (index === 0) {
+        if (keys['a'] || keys['A']) tilt -= 0.15;
+        if (keys['d'] || keys['D']) tilt += 0.15;
+      } else if (index === 1) {
+        if (keys['ArrowLeft']) tilt -= 0.15;
+        if (keys['ArrowRight']) tilt += 0.15;
+      }
+      ctx.rotate(tilt);
+
+      const shipColor = p.color;
 
       // Graze glow
-      if (player.grazeTime > 0) {
+      if (p.grazeTime > 0) {
         ctx.shadowBlur = 40;
         ctx.shadowColor = '#ff00ff';
         ctx.strokeStyle = '#ff00ff';
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(0, 0, player.r + 12, 0, Math.PI * 2);
+        ctx.arc(0, 0, p.r + 12, 0, Math.PI * 2);
         ctx.stroke();
       }
 
-      // Engine glow (radial gradient)
+      // Engine glow
       const gradient = ctx.createRadialGradient(0, 18, 0, 0, 18, 30);
-      gradient.addColorStop(0, '#00ffff');
+      gradient.addColorStop(0, shipColor);
       gradient.addColorStop(0.4, '#0088ff');
       gradient.addColorStop(1, 'transparent');
       ctx.fillStyle = gradient;
@@ -666,7 +1014,7 @@
 
       // Wings
       ctx.shadowBlur = 15;
-      ctx.shadowColor = '#00aaff';
+      ctx.shadowColor = shipColor;
       ctx.fillStyle = '#1a3a5a';
       ctx.beginPath();
       ctx.moveTo(-24, 14);
@@ -677,7 +1025,7 @@
       ctx.lineTo(0, 18);
       ctx.closePath();
       ctx.fill();
-      ctx.strokeStyle = '#00aaff';
+      ctx.strokeStyle = shipColor;
       ctx.lineWidth = 2;
       ctx.stroke();
 
@@ -692,10 +1040,10 @@
       ctx.closePath();
       ctx.fill();
 
-      // Cockpit (glowing)
+      // Cockpit (player color)
       ctx.shadowBlur = 15;
-      ctx.shadowColor = '#00ffff';
-      ctx.fillStyle = '#00ffff';
+      ctx.shadowColor = shipColor;
+      ctx.fillStyle = shipColor;
       ctx.beginPath();
       ctx.ellipse(0, -6, 5, 12, 0, 0, Math.PI * 2);
       ctx.fill();
@@ -715,11 +1063,11 @@
       ctx.closePath();
       ctx.fill();
 
-      // Engine flames (triple flame with animation)
-      const flicker = Math.random() * 5;
+      // Engine flames
+      const flicker = Math.random() * 5; // render-only, use Math.random to avoid PRNG desync
       ctx.shadowBlur = 30;
-      ctx.shadowColor = '#00ffff';
-      ctx.fillStyle = '#00ffff';
+      ctx.shadowColor = shipColor;
+      ctx.fillStyle = shipColor;
       ctx.beginPath();
       ctx.moveTo(-6, 18);
       ctx.lineTo(0, 30 + flicker);
@@ -740,6 +1088,17 @@
       ctx.lineTo(1.5, 18);
       ctx.closePath();
       ctx.fill();
+
+      // Player number indicator (for multiplayer)
+      if (gameMode !== 'single') {
+        ctx.fillStyle = shipColor;
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.shadowBlur = 5;
+        ctx.shadowColor = shipColor;
+        ctx.fillText('P' + (index + 1), 0, -30);
+        ctx.shadowBlur = 0;
+      }
 
       ctx.restore();
     }
@@ -785,8 +1144,8 @@
                 const dx = b.x - portal.x;
                 const dy = b.y - portal.y;
                 if (Math.sqrt(dx*dx + dy*dy) < 30) {
-                  b.x = otherPortal.x + (Math.random() - 0.5) * 20;
-                  b.y = otherPortal.y + (Math.random() - 0.5) * 20;
+                  b.x = otherPortal.x + (gameRandom() - 0.5) * 20;
+                  b.y = otherPortal.y + (gameRandom() - 0.5) * 20;
                 }
               }
             }
@@ -794,7 +1153,7 @@
         }
 
         // Add trail occasionally
-        if (Math.random() < 0.3) {
+        if (gameRandom() < 0.3) {
           addBulletTrail({ x: b.x, y: b.y, color: b.color, r: b.r });
         }
 
@@ -867,21 +1226,36 @@
       return dist < (a.r + b.r);
     }
 
-    function playerHit() {
-      player.lives--;
-      player.invincible = 2;
-      spawnExplosion(player.x, player.y, '#ffffff', 20);
+    function playerHit(p) {
+      if (!p) p = player; // backward compatibility
+      p.lives--;
+      p.invincible = 2;
+      spawnExplosion(p.x, p.y, '#ffffff', 20);
       triggerScreenShake(4, 0.1);
       coyoteTrigger('playerHit');
 
-      // Clear all enemy bullets on death
-      bullets.length = 0;
+      // Clear enemy bullets on death (keep player bullets)
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        if (bullets[i].owner !== 'player') bullets.splice(i, 1);
+      }
       minions.length = 0;
 
-      if (player.lives <= 0) {
-        gameState = STATE.GAMEOVER;
-        spawnExplosion(player.x, player.y, '#00ffff', 80);
-        coyoteTrigger('gameOver');
+      if (p.lives <= 0) {
+        if (gameMode === 'network') {
+          p.active = false;
+          // Check if ALL players dead
+          const anyAlive = players.some(pl => pl.active && pl.lives > 0);
+          if (!anyAlive) {
+            gameState = STATE.GAMEOVER;
+            spawnExplosion(p.x, p.y, p.color, 80);
+            coyoteTrigger('gameOver');
+            netDisconnect();
+          }
+        } else {
+          gameState = STATE.GAMEOVER;
+          spawnExplosion(p.x, p.y, '#00ffff', 80);
+          coyoteTrigger('gameOver');
+        }
       }
     }
 
@@ -891,11 +1265,24 @@
     const MAX_REGEN = 3;
 
     function updateRegen(dt) {
-      if (player.lives < MAX_REGEN) {
+      // Regen applies to all active players
+      let anyNeedsRegen = false;
+      for (let i = 0; i < players.length; i++) {
+        const p = players[i];
+        if (!p.active || p.lives <= 0) continue;
+        if (gameMode === 'single' && i > 0) continue;
+        if (p.lives < MAX_REGEN) anyNeedsRegen = true;
+      }
+      if (anyNeedsRegen) {
         regenTimer += dt;
         if (regenTimer >= REGEN_INTERVAL) {
           regenTimer = 0;
-          player.lives++;
+          for (let i = 0; i < players.length; i++) {
+            const p = players[i];
+            if (!p.active || p.lives <= 0) continue;
+            if (gameMode === 'single' && i > 0) continue;
+            if (p.lives < MAX_REGEN) p.lives++;
+          }
         }
       } else {
         regenTimer = 0;
@@ -903,36 +1290,46 @@
     }
 
     function checkPlayerHit() {
-      if (player.invincible > 0) return;
+      // Check all active players
+      const activePlayers = (gameMode === 'network')
+        ? players.filter(p => p.active && p.lives > 0)
+        : (gameMode === 'coop')
+          ? players.filter(p => p.active)
+          : [player];
 
-      // Laser damage
-      if (boss.laserActive) {
-        const dx = player.x - boss.x;
-        const dy = player.y - boss.y;
-        const playerDist = Math.sqrt(dx*dx + dy*dy);
-        if (playerDist < 400) {
-          playerHit();
-        }
-      }
+      for (const p of activePlayers) {
+        if (p.invincible > 0) continue;
 
-      for (let i = bullets.length - 1; i >= 0; i--) {
-        const b = bullets[i];
-        if (b.owner !== 'player') {
-          // Graze detection (close miss)
-          const dx = player.x - b.x;
-          const dy = player.y - b.y;
-          const dist = Math.sqrt(dx*dx + dy*dy);
-          if (dist < player.r + b.r + 8 && dist > player.r + b.r) {
-            player.grazeTime = 0.1;
-            graze++;
-            score += 1;
-            b.grazed = true;
+        // Laser damage
+        if (boss.laserActive) {
+          const dx = p.x - boss.x;
+          const dy = p.y - boss.y;
+          const playerDist = Math.sqrt(dx*dx + dy*dy);
+          if (playerDist < 400) {
+            playerHit(p);
+            continue;
           }
+        }
 
-          if (circleCollision(player, b)) {
-            bullets.splice(i, 1);
-            playerHit();
-            return;
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          if (b.owner !== 'player') {
+            // Graze detection
+            const dx = p.x - b.x;
+            const dy = p.y - b.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < p.r + b.r + 8 && dist > p.r + b.r) {
+              p.grazeTime = 0.1;
+              graze++;
+              score += 1;
+              b.grazed = true;
+            }
+
+            if (circleCollision(p, b)) {
+              bullets.splice(i, 1);
+              playerHit(p);
+              break;
+            }
           }
         }
       }
@@ -1207,8 +1604,8 @@
       }
       else if (pattern === 'rain' || pattern === 'chaos') {
         // Random position shifts
-        if (Math.random() < 0.02) {
-          boss.x = 100 + Math.random() * (canvas.width - 200);
+        if (gameRandom() < 0.02) {
+          boss.x = 100 + gameRandom() * (canvas.width - 200);
         }
       }
       else {
@@ -1331,19 +1728,19 @@
     function triggerTeleport() {
       spawnExplosion(boss.x, boss.y, '#ffffff', 20);
       boss.x = canvas.width - boss.x;
-      boss.y = 80 + (Math.random() - 0.5) * 60;
+      boss.y = 80 + (gameRandom() - 0.5) * 60;
       triggerScreenShake(5, 0.2);
       spawnExplosion(boss.x, boss.y, boss.color, 20);
     }
 
     function triggerSummon() {
-      const count = 2 + Math.floor(Math.random() * 2);
+      const count = 2 + Math.floor(gameRandom() * 2);
       for (let i = 0; i < count; i++) {
         minions.push({
-          x: 50 + Math.random() * (canvas.width - 100),
+          x: 50 + gameRandom() * (canvas.width - 100),
           y: -20,
-          vx: 20 + Math.random() * 30,
-          vy: 50 + Math.random() * 30,
+          vx: 20 + gameRandom() * 30,
+          vy: 50 + gameRandom() * 30,
           r: 10,
           hp: 20,
           color: boss.color
@@ -1383,10 +1780,10 @@
       boss.clones = [];
       for (let i = 0; i < 2; i++) {
         boss.clones.push({
-          x: boss.x + (Math.random() - 0.5) * 100,
-          y: boss.y + (Math.random() - 0.5) * 50,
+          x: boss.x + (gameRandom() - 0.5) * 100,
+          y: boss.y + (gameRandom() - 0.5) * 50,
           alpha: 0.5,
-          offset: Math.random() * Math.PI * 2
+          offset: gameRandom() * Math.PI * 2
         });
       }
       safeTimeout(() => { boss.clones = []; }, 5000);
@@ -1416,7 +1813,7 @@
       boss.laserActive = true;
       boss.laserPhase = 'aiming'; // aiming -> locked -> firing -> fading
       boss.laserTimer = 0;
-      boss.laserAngle = Math.atan2(player.y - boss.y, player.x - boss.x);
+      boss.laserAngle = Math.atan2(getNearestActivePlayer(boss.x, boss.y).y - boss.y, getNearestActivePlayer(boss.x, boss.y).x - boss.x);
       boss.laserWidth = 0;
     }
 
@@ -1427,8 +1824,9 @@
       const phase = boss.laserPhase;
 
       if (phase === 'aiming') {
-        // Track player position
-        boss.laserAngle = Math.atan2(player.y - boss.y, player.x - boss.x);
+        // Track nearest player position
+        const target = getNearestActivePlayer(boss.x, boss.y);
+        boss.laserAngle = Math.atan2(target.y - boss.y, target.x - boss.x);
         boss.laserWidth = 5;
         // Warning line - thin targeting
         if (boss.laserTimer > 1.5) {
@@ -1461,9 +1859,9 @@
 
     function triggerPhantomTank() {
       boss.phantomTankActive = true;
-      boss.phantomTankX = Math.random() > 0.5 ? 50 : canvas.width - 50;
+      boss.phantomTankX = gameRandom() > 0.5 ? 50 : canvas.width - 50;
       boss.phantomTankVisible = true;
-      setTimeout(() => {
+      safeTimeout(() => {
         boss.phantomTankVisible = false;
         bullets.push({
           x: boss.phantomTankX,
@@ -1491,8 +1889,8 @@
       // 创建3个虚影
       for (let i = 0; i < 3; i++) {
         shadowRealms.push({
-          x: boss.x + (Math.random() - 0.5) * 100,
-          y: boss.y + (Math.random() - 0.5) * 50,
+          x: boss.x + (gameRandom() - 0.5) * 100,
+          y: boss.y + (gameRandom() - 0.5) * 50,
           life: 5,
           maxLife: 5
         });
@@ -1500,7 +1898,7 @@
     }
 
     function triggerGhostDash() {
-      boss.x = player.x + (Math.random() - 0.5) * 100;
+      boss.x = player.x + (gameRandom() - 0.5) * 100;
       boss.y = Math.min(player.y + 50, canvas.height - 100);
       triggerScreenShake(3, 0.1);
     }
@@ -1688,7 +2086,7 @@
         // Irregular rocky shape with more points
         for (let i = 0; i < 14; i++) {
           const angle = (i / 14) * Math.PI * 2;
-          const irregularity = Math.random() ? (Math.sin(time * 5 + i) * 0.25) : 0;
+          const irregularity = (Math.sin(time * 5 + i) * 0.25); // render-only visual effect
           const len = boss.r * (0.55 + irregularity);
           if (i === 0) ctx.moveTo(Math.cos(angle) * len, Math.sin(angle) * len);
           else ctx.lineTo(Math.cos(angle) * len, Math.sin(angle) * len);
@@ -1865,7 +2263,7 @@
       ctx.restore();
     }
 
-    // Boss particle system
+    // Boss particle system (visual only - uses Math.random to avoid PRNG desync)
     const bossParticles = [];
     function initBossParticles() {
       bossParticles.length = 0;
@@ -1957,8 +2355,9 @@
         ctx.stroke();
       }
 
-      // Pupil with tracking toward player
-      const trackAngle = Math.atan2(player.y - boss.y, player.x - boss.x);
+      // Pupil with tracking toward nearest player
+      const trackTarget = getNearestActivePlayer(boss.x, boss.y);
+      const trackAngle = Math.atan2(trackTarget.y - boss.y, trackTarget.x - boss.x);
       const pupilOffset = eyeSize * 0.3;
       const pupilX = Math.cos(trackAngle) * pupilOffset;
       const pupilY = Math.sin(trackAngle) * pupilOffset;
@@ -2338,10 +2737,10 @@
       else if (p === 'scatter') {
         for (let i = 0; i < 5; i++) {
           bullets.push({
-            x: boss.x + (Math.random() - 0.5) * 100,
+            x: boss.x + (gameRandom() - 0.5) * 100,
             y: boss.y + 20,
-            vx: (Math.random() - 0.5) * 150,
-            vy: 80 + Math.random() * 50,
+            vx: (gameRandom() - 0.5) * 150,
+            vy: 80 + gameRandom() * 50,
             r: 4,
             owner: 'boss',
             color: '#00ff00'
@@ -2349,8 +2748,9 @@
         }
       }
       else if (p === 'beam') {
-        const dx = player.x - boss.x;
-        const dy = player.y - boss.y;
+        const beamTarget = getNearestActivePlayer(boss.x, boss.y);
+        const dx = beamTarget.x - boss.x;
+        const dy = beamTarget.y - boss.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
         bullets.push({
           x: boss.x,
@@ -2363,14 +2763,15 @@
         });
       }
       else if (p === 'homing') {
-        const dx = player.x - boss.x;
-        const dy = player.y - boss.y;
+        const homingTarget = getNearestActivePlayer(boss.x, boss.y);
+        const dx = homingTarget.x - boss.x;
+        const dy = homingTarget.y - boss.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
         bullets.push({
           x: boss.x,
           y: boss.y,
-          vx: (dx/dist) * 100 + (Math.random() - 0.5) * 50,
-          vy: (dy/dist) * 100 + (Math.random() - 0.5) * 50,
+          vx: (dx/dist) * 100 + (gameRandom() - 0.5) * 50,
+          vy: (dy/dist) * 100 + (gameRandom() - 0.5) * 50,
           r: 5,
           owner: 'boss',
           color: '#ff8800'
@@ -2379,10 +2780,10 @@
       else if (p === 'rain') {
         for (let i = 0; i < 5; i++) {
           bullets.push({
-            x: Math.random() * canvas.width,
+            x: gameRandom() * canvas.width,
             y: -10,
-            vx: (Math.random() - 0.5) * 30,
-            vy: 100 + Math.random() * 50,
+            vx: (gameRandom() - 0.5) * 30,
+            vy: 100 + gameRandom() * 50,
             r: 4,
             owner: 'boss',
             color: '#ff8800'
@@ -2534,16 +2935,16 @@
       else if (p === 'chaos') {
         // Random spray with varied speeds
         for (let i = 0; i < 4; i++) {
-          const angle = Math.random() * Math.PI * 2;
-          const speed = 50 + Math.random() * 100;
+          const angle = gameRandom() * Math.PI * 2;
+          const speed = 50 + gameRandom() * 100;
           bullets.push({
-            x: boss.x + (Math.random() - 0.5) * 30,
-            y: boss.y + (Math.random() - 0.5) * 30,
+            x: boss.x + (gameRandom() - 0.5) * 30,
+            y: boss.y + (gameRandom() - 0.5) * 30,
             vx: Math.cos(angle) * speed,
             vy: Math.sin(angle) * speed + 30,
-            r: 3 + Math.random() * 4,
+            r: 3 + gameRandom() * 4,
             owner: 'boss',
-            color: Math.random() > 0.5 ? boss.color : '#ffffff'
+            color: gameRandom() > 0.5 ? boss.color : '#ffffff'
           });
         }
       }
@@ -2698,18 +3099,18 @@
 
     function spawnMinions() {
       if (minions.length >= 6) return;
-      if (Math.random() > 0.3) return;
+      if (gameRandom() > 0.3) return;
 
-      const side = Math.random() > 0.5 ? -1 : 1;
+      const side = gameRandom() > 0.5 ? -1 : 1;
       minions.push({
         x: side === -1 ? -20 : canvas.width + 20,
-        y: 50 + Math.random() * 150,
+        y: 50 + gameRandom() * 150,
         r: 12,
         hp: 1,
-        vx: side * (30 + Math.random() * 20),
-        vy: (Math.random() - 0.5) * 30,
+        vx: side * (30 + gameRandom() * 20),
+        vy: (gameRandom() - 0.5) * 30,
         color: boss.color,
-        type: Math.random() > 0.5 ? 'floater' : 'zigzag'
+        type: gameRandom() > 0.5 ? 'floater' : 'zigzag'
       });
     }
 
@@ -2728,7 +3129,7 @@
         }
 
         // Shoot
-        if (Math.random() < 0.02) {
+        if (gameRandom() < 0.02) {
           const dx = player.x - m.x;
           const dy = player.y - m.y;
           const dist = Math.sqrt(dx*dx + dy*dy);
@@ -2837,12 +3238,12 @@
             // Spawn powerups - increase with waves
             const dropCount = Math.min(1 + Math.floor(waveCount / 3), 6);
             for (let i = 0; i < dropCount; i++) {
-              spawnPowerup(boss.x + (Math.random() - 0.5) * 80, boss.y + (Math.random() - 0.5) * 60);
+              spawnPowerup(boss.x + (gameRandom() - 0.5) * 80, boss.y + (gameRandom() - 0.5) * 60);
             }
             // PHANTOM Phase 3 extra drops
             if (boss.name === 'PHANTOM' && boss.phase === 2) {
               for (let i = 0; i < 2; i++) {
-                spawnPowerup(boss.x + (Math.random() - 0.5) * 80, boss.y, {name: 'POWER', color: '#ff0066'});
+                spawnPowerup(boss.x + (gameRandom() - 0.5) * 80, boss.y, {name: 'POWER', color: '#ff0066'});
               }
             }
             score += 1000;
@@ -2898,13 +3299,17 @@
       }
 
       // Player 2 lives (top right, coop mode only)
-      if (gameMode === 'coop' && players[1].active) {
-        ctx.textAlign = 'right';
-        for (let i = 0; i < players[1].lives; i++) {
-          ctx.fillStyle = '#ff8800';
-          ctx.shadowBlur = 10;
-          ctx.shadowColor = '#ff8800';
-          ctx.fillText('❤', canvas.width - 60 + i * 20, 30);
+      if ((gameMode === 'coop' || gameMode === 'network') && players[1].active) {
+        const playerColors = ['#00ffff', '#ff8800', '#ff00ff', '#00ff00'];
+        for (let pi = 1; pi < players.length; pi++) {
+          if (!players[pi].active) continue;
+          ctx.textAlign = 'right';
+          for (let i = 0; i < players[pi].lives; i++) {
+            ctx.fillStyle = playerColors[pi];
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = playerColors[pi];
+            ctx.fillText('❤', canvas.width - 20 - (pi - 1) * 80 + i * 20, 30);
+          }
         }
       }
       ctx.restore();
@@ -2988,7 +3393,6 @@
         ctx.fillText(`GRAZE ${graze}`, canvas.width / 2, canvas.height - 75);
         ctx.restore();
       }
-    }
 
       // === PLAYER STATUS AREA ===
       // Lives with animation
@@ -3198,10 +3602,10 @@
     const ambientParticles = [];
     for (let i = 0; i < 80; i++) {
       stars.push({
-        x: Math.random() * canvas.width,
-        y: Math.random() * canvas.height,
-        s: Math.random() * 2 + 1,
-        speed: Math.random() * 20 + 10
+        x: gameRandom() * canvas.width,
+        y: gameRandom() * canvas.height,
+        s: gameRandom() * 2 + 1,
+        speed: gameRandom() * 20 + 10
       });
     }
 
@@ -3210,12 +3614,12 @@
 
     function spawnMeteor() {
       meteors.push({
-        x: Math.random() * canvas.width,
+        x: gameRandom() * canvas.width,
         y: -20,
-        length: Math.random() * 40 + 30,
-        speed: Math.random() * 250 + 150, // 更快
-        angle: Math.PI / 4 + (Math.random() - 0.5) * 0.3,
-        brightness: Math.random() * 0.2 + 0.1, // 更暗
+        length: gameRandom() * 40 + 30,
+        speed: gameRandom() * 250 + 150, // 更快
+        angle: Math.PI / 4 + (gameRandom() - 0.5) * 0.3,
+        brightness: gameRandom() * 0.2 + 0.1, // 更暗
         trail: []
       });
     }
@@ -3231,7 +3635,7 @@
           meteors.splice(i, 1);
         }
       }
-      if (Math.random() < 0.008) spawnMeteor(); // 更少
+      if (gameRandom() < 0.008) spawnMeteor(); // 更少
     }
 
     function renderMeteors() {
@@ -3386,11 +3790,11 @@
         const angle = (i / 8) * Math.PI * 2;
         sparkles.push({
           x, y,
-          vx: Math.cos(angle) * (50 + Math.random() * 50),
-          vy: Math.sin(angle) * (50 + Math.random() * 50),
-          life: 0.5 + Math.random() * 0.3,
+          vx: Math.cos(angle) * (50 + gameRandom() * 50),
+          vy: Math.sin(angle) * (50 + gameRandom() * 50),
+          life: 0.5 + gameRandom() * 0.3,
           color,
-          size: 2 + Math.random() * 2
+          size: 2 + gameRandom() * 2
         });
       }
     }
@@ -3458,8 +3862,8 @@
       for (let i = 0; i < 5; i++) {
         particles.push({
           x, y,
-          vx: (Math.random() - 0.5) * 100,
-          vy: (Math.random() - 0.5) * 100,
+          vx: (gameRandom() - 0.5) * 100,
+          vy: (gameRandom() - 0.5) * 100,
           life: 0.5,
           color
         });
@@ -3509,8 +3913,7 @@
         s.y += s.speed * 0.016;
         if (s.y > canvas.height) {
           s.y = 0;
-          s.x = Math.random() * canvas.width;
-        }
+          s.x = Math.random() * canvas.width;        }
 
         // Different brightness based on layer
         const alpha = 0.2 + s.s / 5;
@@ -3537,15 +3940,15 @@
       }
 
       // Ambient particles floating
-      if (Math.random() < 0.05) {
+      if (gameRandom() < 0.05) {
         ambientParticles.push({
-          x: Math.random() * canvas.width,
+          x: gameRandom() * canvas.width,
           y: canvas.height + 10,
-          vx: (Math.random() - 0.5) * 20,
-          vy: -10 - Math.random() * 20,
-          r: 1 + Math.random() * 2,
-          life: 3 + Math.random() * 2,
-          color: ['#00ffff', '#ff00ff', '#00ff88'][Math.floor(Math.random() * 3)]
+          vx: (gameRandom() - 0.5) * 20,
+          vy: -10 - gameRandom() * 20,
+          r: 1 + gameRandom() * 2,
+          life: 3 + gameRandom() * 2,
+          color: ['#00ffff', '#ff00ff', '#00ff88'][Math.floor(gameRandom() * 3)]
         });
       }
 
@@ -3614,8 +4017,8 @@
     function updateScreenShake(dt) {
       if (screenShake.time > 0) {
         screenShake.time -= dt;
-        screenShake.x = (Math.random() - 0.5) * screenShake.intensity * 2;
-        screenShake.y = (Math.random() - 0.5) * screenShake.intensity * 2;
+        screenShake.x = (gameRandom() - 0.5) * screenShake.intensity * 2;
+        screenShake.y = (gameRandom() - 0.5) * screenShake.intensity * 2;
       } else {
         screenShake.x = 0;
         screenShake.y = 0;
@@ -3627,14 +4030,14 @@
 
     function spawnExplosion(x, y, color, count = 40) {
       for (let i = 0; i < count; i++) {
-        const angle = (Math.PI * 2 / count) * i + Math.random() * 0.5;
-        const speed = 100 + Math.random() * 200;
+        const angle = (Math.PI * 2 / count) * i + gameRandom() * 0.5;
+        const speed = 100 + gameRandom() * 200;
         explosionParticles.push({
           x, y,
           vx: Math.cos(angle) * speed,
           vy: Math.sin(angle) * speed,
-          r: 3 + Math.random() * 4,
-          life: 0.5 + Math.random() * 0.5,
+          r: 3 + gameRandom() * 4,
+          life: 0.5 + gameRandom() * 0.5,
           color
         });
       }
@@ -3796,10 +4199,34 @@
     }
 
     function updateMenu(dt) {
+      // Title phase: press any key to continue
+      if (menuPhase === 'title') {
+        if (Object.values(keys).some(v => v === true)) {
+          menuPhase = 'select';
+          menuSelection = 0;
+          for (const k in keys) keys[k] = false;
+        }
+        return;
+      }
+
       // Toggle leaderboard view
-      if (isDown('l') || isDown('L')) {
+      if ((isDown('l') || isDown('L')) && !keys['L_pressed']) {
+        keys['L_pressed'] = true;
         currentPage = currentPage === 'MENU' ? 'LEADERBOARD' : 'MENU';
       }
+      if (!isDown('l') && !isDown('L')) keys['L_pressed'] = false;
+
+      // ESC: go back to title
+      if (isDown('Escape') && !keys['Escape_menu_pressed']) {
+        keys['Escape_menu_pressed'] = true;
+        if (currentPage === 'LEADERBOARD') {
+          currentPage = 'MENU';
+        } else {
+          menuPhase = 'title';
+        }
+        return;
+      }
+      if (!isDown('Escape')) keys['Escape_menu_pressed'] = false;
 
       // Menu selection navigation
       if (isDown('ArrowUp') && !keys['ArrowUp_pressed']) {
@@ -3814,8 +4241,9 @@
       if (!isDown('ArrowUp')) keys['ArrowUp_pressed'] = false;
       if (!isDown('ArrowDown')) keys['ArrowDown_pressed'] = false;
 
-      // Confirm selection
-      if (isDown(' ') || isDown('Enter')) {
+      // Confirm selection (with edge detection to prevent repeat)
+      if ((isDown(' ') || isDown('Enter')) && !keys['Enter_menu_pressed']) {
+        keys['Enter_menu_pressed'] = true;
         if (menuSelection === 0) { // 单人游戏
           gameMode = 'single';
           startGame();
@@ -3824,20 +4252,118 @@
           startGame();
         } else if (menuSelection === 2) { // 网络对战
           gameMode = 'network';
+          lobbySubState = 'choose';
+          lobbySelection = 0;
+          lobbyError = '';
+          lobbyPlayers = [];
           gameState = STATE.LOBBY;
         }
+      }
+      if (!isDown(' ') && !isDown('Enter')) keys['Enter_menu_pressed'] = false;
+    }
+
+    function updateLobby(dt) {
+      // ESC: go back
+      if (isDown('Escape') && !keys['Escape_pressed']) {
+        keys['Escape_pressed'] = true;
+        if (lobbySubState === 'choose') {
+          gameState = STATE.MENU;
+          menuPhase = 'select';
+          return;
+        } else if (lobbySubState === 'inputIp') {
+          lobbySubState = 'choose';
+          return;
+        } else {
+          netDisconnect();
+          lobbySubState = 'choose';
+          return;
+        }
+      }
+      if (!isDown('Escape')) keys['Escape_pressed'] = false;
+
+      if (lobbySubState === 'choose') {
+        // Navigate menu
+        if (isDown('ArrowUp') && !keys['ArrowUp_pressed']) {
+          keys['ArrowUp_pressed'] = true;
+          lobbySelection = (lobbySelection - 1 + 2) % 2;
+        }
+        if (isDown('ArrowDown') && !keys['ArrowDown_pressed']) {
+          keys['ArrowDown_pressed'] = true;
+          lobbySelection = (lobbySelection + 1) % 2;
+        }
+        if (!isDown('ArrowUp')) keys['ArrowUp_pressed'] = false;
+        if (!isDown('ArrowDown')) keys['ArrowDown_pressed'] = false;
+
+        if ((isDown(' ') || isDown('Enter')) && !keys['Enter_pressed']) {
+          keys['Enter_pressed'] = true;
+          if (lobbySelection === 0) {
+            // Create room - connect to own relay
+            lobbySubState = 'hosting';
+            netConnect('localhost');
+          } else {
+            // Join game
+            lobbySubState = 'inputIp';
+            hostIpInput = '';
+          }
+        }
+        if (!isDown('Enter') && !isDown(' ')) keys['Enter_pressed'] = false;
+
+      } else if (lobbySubState === 'inputIp') {
+        // Enter to connect
+        if (isDown('Enter') && !keys['Enter_pressed']) {
+          keys['Enter_pressed'] = true;
+          if (hostIpInput.length > 0) {
+            netConnect(hostIpInput);
+            lobbySubState = 'connecting'; // Wait for welcome message to confirm
+          }
+        }
+        if (!isDown('Enter')) keys['Enter_pressed'] = false;
+
+      } else if (lobbySubState === 'hosting') {
+        // Host: Space/Enter to start game when players connected
+        if ((isDown(' ') || isDown('Enter')) && !keys['Enter_pressed']) {
+          keys['Enter_pressed'] = true;
+          if (lobbyPlayers.length >= 1) {
+            const seed = Date.now();
+            const count = lobbyPlayers.length;
+            gameRng = mulberry32(seed);
+            netSend({ t: 'start', seed: seed, count: count });
+            startNetworkGame(count);
+          }
+        }
+        if (!isDown('Enter') && !isDown(' ')) keys['Enter_pressed'] = false;
+
+      } else if (lobbySubState === 'connected') {
+        // Client: R to toggle ready
+        if ((isDown('r') || isDown('R')) && !keys['R_pressed']) {
+          keys['R_pressed'] = true;
+          netSend({ t: 'ready' });
+        }
+        if (!isDown('r') && !isDown('R')) keys['R_pressed'] = false;
       }
     }
 
     function updateGameOver(dt) {
       if (isDown(' ') || isDown('Enter')) {
-        startGame();
+        if (gameMode === 'network') {
+          netDisconnect();
+          gameMode = 'single';
+          gameRng = null;
+        }
+        gameState = STATE.MENU;
+        menuPhase = 'select';
       }
 
       // Save to leaderboard
       if ((isDown('s') || isDown('S')) && score > 0) {
         addToLeaderboard('PILOT', score, waveCount);
+        if (gameMode === 'network') {
+          netDisconnect();
+          gameMode = 'single';
+          gameRng = null;
+        }
         gameState = STATE.MENU;
+        menuPhase = 'select';
         currentPage = 'MENU';
       }
     }
@@ -3901,14 +4427,19 @@
       gameTime = 0;
       displayHp = 100;
 
-      // Reset both players
-      for (const p of players) {
+      // Reset all players
+      for (let i = 0; i < players.length; i++) {
+        const p = players[i];
         p.lives = 3;
         p.power = 0;
         p.x = canvas.width / 2;
         p.y = canvas.height - 80;
         p.bombReady = true;
         p.bombCooldown = 0;
+        p.invincible = 0;
+        p.shootCooldown = 0;
+        p._bombWasDown = false;
+        p.active = (i === 0); // Only P1 active by default
       }
 
       // Activate player 2 in coop mode
@@ -3917,6 +4448,7 @@
         players[1].x = canvas.width / 2 + 30;
         players[0].x = canvas.width / 2 - 30;
       }
+      // Network mode: startNetworkGame handles activation
 
       powerups.length = 0;
       minions.length = 0;
@@ -3952,19 +4484,29 @@
       ctx.font = '16px monospace';
       ctx.fillText('BOSS RUSH', canvas.width/2, canvas.height/2 - 10);
 
-      // Blinking "PRESS SPACE"
-      if (Math.floor(time * 2) % 2 === 0) {
-        ctx.fillStyle = '#00ffff';
-        ctx.font = '16px monospace';
-        ctx.fillText('PRESS SPACE TO START', canvas.width/2, canvas.height/2 + 40);
+      // Title phase: only show "PRESS ANY KEY"
+      if (menuPhase === 'title') {
+        if (Math.floor(time * 2) % 2 === 0) {
+          ctx.fillStyle = '#00ffff';
+          ctx.font = '16px monospace';
+          ctx.fillText('PRESS ANY KEY', canvas.width/2, canvas.height/2 + 50);
+        }
+        ctx.textAlign = 'left';
+        return;
       }
 
-      // Menu options
+      // Select phase: show menu options with indicator
+      const menuStartY = canvas.height/2 + 30;
       ctx.font = '14px "Courier New", monospace';
       ctx.textAlign = 'center';
       for (let i = 0; i < menuOptions.length; i++) {
-        ctx.fillStyle = i === menuSelection ? '#00ffff' : '#444444';
-        ctx.fillText(menuOptions[i], canvas.width / 2, 280 + i * 30);
+        if (i === menuSelection) {
+          ctx.fillStyle = '#00ffff';
+          ctx.fillText('▶ ' + menuOptions[i], canvas.width / 2, menuStartY + i * 30);
+        } else {
+          ctx.fillStyle = '#666666';
+          ctx.fillText('  ' + menuOptions[i], canvas.width / 2, menuStartY + i * 30);
+        }
       }
 
       // Left sidebar game tips - clean vertical layout
@@ -3978,15 +4520,134 @@
 
       ctx.fillStyle = '#888';
       ctx.font = '11px monospace';
-      ctx.fillText('  ARROWS  Move', tipX, tipY); tipY += 18;
-      ctx.fillText('  SPACE   Bomb', tipX, tipY); tipY += 18;
-      ctx.fillText('  ESC     Pause', tipX, tipY);
+      ctx.fillText('  P1: WASD Move / SPACE Bomb', tipX, tipY); tipY += 18;
+      ctx.fillText('  P2: ARROWS Move / / Bomb', tipX, tipY); tipY += 18;
+      ctx.fillText('  ESC  Pause / Back', tipX, tipY);
 
       // Center bottom hint
       ctx.textAlign = 'center';
       ctx.fillStyle = '#666';
       ctx.font = '12px monospace';
-      ctx.fillText('PRESS L FOR LEADERBOARD', canvas.width/2, canvas.height - 30);
+      ctx.fillText('PRESS L FOR LEADERBOARD  |  ESC TO GO BACK', canvas.width/2, canvas.height - 30);
+      ctx.textAlign = 'left';
+    }
+
+    function renderLobby() {
+      const time = Date.now() / 1000;
+      const cx = canvas.width / 2;
+
+      // Title
+      ctx.save();
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ff00ff';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.font = '24px monospace';
+      ctx.fillText('NETWORK BATTLE', cx, 80);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+
+      ctx.fillStyle = '#ff00ff';
+      ctx.textAlign = 'center';
+      ctx.font = '12px monospace';
+      ctx.fillText('网络对战', cx, 105);
+
+      // Error message
+      if (lobbyError) {
+        ctx.fillStyle = '#ff4444';
+        ctx.font = '12px monospace';
+        ctx.fillText(lobbyError, cx, 130);
+      }
+
+      if (lobbySubState === 'choose') {
+        const opts = ['创建房间 (主机)', '加入游戏 (客户端)'];
+        ctx.font = '16px monospace';
+        for (let i = 0; i < opts.length; i++) {
+          ctx.fillStyle = i === lobbySelection ? '#00ffff' : '#444444';
+          ctx.fillText(opts[i], cx, 220 + i * 40);
+        }
+
+        ctx.fillStyle = '#666';
+        ctx.font = '11px monospace';
+        ctx.fillText('主机需先运行: node relay.js', cx, 340);
+        ctx.fillText('[ESC] 返回', cx, canvas.height - 30);
+
+      } else if (lobbySubState === 'inputIp') {
+        ctx.fillStyle = '#00ffff';
+        ctx.font = '14px monospace';
+        ctx.fillText('输入主机 IP 地址:', cx, 200);
+
+        // IP input box
+        const boxW = 300, boxH = 36;
+        ctx.strokeStyle = '#00ffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(cx - boxW/2, 220, boxW, boxH);
+        ctx.fillStyle = 'rgba(0,255,255,0.1)';
+        ctx.fillRect(cx - boxW/2, 220, boxW, boxH);
+
+        ctx.fillStyle = '#fff';
+        ctx.font = '18px monospace';
+        const displayIp = hostIpInput + (Math.floor(time * 2) % 2 === 0 ? '_' : ' ');
+        ctx.fillText(displayIp, cx, 245);
+
+        ctx.fillStyle = '#666';
+        ctx.font = '11px monospace';
+        ctx.fillText('[ENTER] 连接  [ESC] 返回', cx, 290);
+        ctx.fillText('例: 26.0.0.1', cx, 320);
+
+      } else if (lobbySubState === 'connecting') {
+        // Connecting animation
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = '16px monospace';
+        const dots = '.'.repeat(Math.floor(time * 3) % 4);
+        ctx.fillText('连接中' + dots, cx, 220);
+        ctx.fillStyle = '#666';
+        ctx.font = '11px monospace';
+        ctx.fillText('[ESC] 取消', cx, 280);
+
+      } else if (lobbySubState === 'hosting' || lobbySubState === 'connected') {
+        // Status
+        ctx.fillStyle = '#00ff88';
+        ctx.font = '14px monospace';
+        ctx.fillText(lobbyStatusMsg, cx, 170);
+
+        // Player list
+        ctx.fillStyle = '#00ffff';
+        ctx.font = '14px monospace';
+        ctx.fillText('--- 玩家列表 ---', cx, 210);
+
+        const playerColors = ['#00ffff', '#ff8800', '#ff00ff', '#00ff00'];
+        for (let i = 0; i < lobbyPlayers.length; i++) {
+          const p = lobbyPlayers[i];
+          const isMe = p.id === network.localPlayerId;
+          const isHost = p.id === 0;
+          ctx.fillStyle = playerColors[p.id % 4];
+          let label = 'P' + (p.id + 1);
+          if (isHost) label += ' [房主]';
+          if (isMe) label += ' (你)';
+          if (p.ready) label += ' READY';
+          ctx.fillText(label, cx, 240 + i * 28);
+        }
+
+        // Instructions
+        ctx.fillStyle = '#666';
+        ctx.font = '11px monospace';
+        if (lobbySubState === 'hosting') {
+          ctx.fillText('等待玩家加入...', cx, 380);
+          if (lobbyPlayers.length >= 1) {
+            if (Math.floor(time * 2) % 2 === 0) {
+              ctx.fillStyle = '#00ffff';
+              ctx.fillText('[SPACE/ENTER] 开始游戏', cx, 410);
+            }
+          }
+        } else {
+          ctx.fillText('[R] 准备就绪', cx, 380);
+          ctx.fillText('等待房主开始游戏...', cx, 410);
+        }
+        ctx.fillStyle = '#666';
+        ctx.font = '11px monospace';
+        ctx.fillText('[ESC] 断开连接', cx, canvas.height - 30);
+      }
       ctx.textAlign = 'left';
     }
 
@@ -4132,7 +4793,7 @@
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // Glitch effect on GAME OVER text
-      const glitchOffset = Math.random() > 0.9 ? (Math.random() - 0.5) * 10 : 0;
+      const glitchOffset = gameRandom() > 0.9 ? (gameRandom() - 0.5) * 10 : 0;
 
       ctx.fillStyle = '#ff4444';
       ctx.textAlign = 'center';
@@ -4279,6 +4940,9 @@
           break;
         case STATE.SETTINGS:
           renderSettings();
+          break;
+        case STATE.LOBBY:
+          renderLobby();
           break;
       }
 
@@ -4466,8 +5130,8 @@
       // Force browser to recalculate canvas layout
       canvas.style.display = 'none';
       canvas.offsetHeight; // Trigger reflow
-      canvas.style.display = 'block';
-    };
+      canvas.style.display = '';
+    }
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('orientationchange', handleResize);
