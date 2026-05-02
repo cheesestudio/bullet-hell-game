@@ -4,11 +4,17 @@
 
 ---
 
+## ▶️ 在线游玩
+
+[点击开始游戏](https://cheesestudio.github.io/bullet-hell-game/bullet-hell.html)
+
+> ⚠️ 在线版本不包含DG-Lab联动功能，下载完整包才能获得完整体验！
+
+---
+
 ## 🔧 本地运行
 
 直接浏览器打开 `bullet-hell.html` 即可游玩，不需要服务器。
-
-> ⚠️ 在线版本不包含DG-Lab联动功能，下载完整包才能获得完整体验！
 
 ---
 
