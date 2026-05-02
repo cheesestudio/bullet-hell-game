@@ -2407,11 +2407,10 @@
 
     function fireStraightShot(p) {
       const speed = 500 + p.power * 30;
-      const ang = aimAtBoss(p);
       bullets.push({
         x: p.x, y: p.y - 20,
-        vx: Math.cos(ang) * speed,
-        vy: Math.sin(ang) * speed,
+        vx: 0,
+        vy: -speed,
         r: 6, owner: 'player', type: 'spread', dmg: 3,
         color: p.power >= 2 ? '#00ffff' : '#00aaff'
       });
@@ -2419,7 +2418,7 @@
 
     function fireSpreadShot(p) {
       const speed = 400 + p.power * 30;
-      const baseAng = aimAtBoss(p);
+      const baseAng = -Math.PI / 2;
       const angles = p.power >= 2 ? [-30, -15, 0, 15, 30] : [-15, 0, 15];
       for (const offset of angles) {
         const ang = baseAng + offset * Math.PI / 180;
