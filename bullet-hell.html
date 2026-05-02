@@ -1532,11 +1532,37 @@
         }
 
         if (b.type === 'pendulum') {
-          // Pendulum trail
-          ctx.fillStyle = `rgba(255,221,0,0.3)`;
+          // Pendulum bob - weighted sphere with chain trail
+          ctx.shadowBlur = 18;
+          ctx.shadowColor = '#ffdd00';
+          // Glow halo
+          const pGrad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r * 2);
+          pGrad.addColorStop(0, 'rgba(255,221,0,0.4)');
+          pGrad.addColorStop(1, 'rgba(255,221,0,0)');
+          ctx.fillStyle = pGrad;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r * 2, 0, Math.PI * 2);
+          ctx.fill();
+          // Main bob
+          ctx.fillStyle = '#ffdd00';
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
           ctx.fill();
+          // Inner ring
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = 0.7;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r * 0.5, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          // Bright center
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = 0.9;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r * 0.25, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
         }
 
         if (b.type === 'ice' && b.frozen) {
@@ -1545,6 +1571,46 @@
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.r + 10, 0, Math.PI * 2);
           ctx.stroke();
+        }
+
+        if (b.type === 'ice' && !b.frozen) {
+          // Ice crystal - pointed shard shape
+          const ir = b.r;
+          ctx.shadowBlur = 18;
+          ctx.shadowColor = '#00ddff';
+          // Main crystal body
+          const iceGrad = ctx.createLinearGradient(b.x, b.y - ir * 3, b.x, b.y + ir * 2);
+          iceGrad.addColorStop(0, '#ffffff');
+          iceGrad.addColorStop(0.3, '#88eeff');
+          iceGrad.addColorStop(1, '#00ddff44');
+          ctx.fillStyle = iceGrad;
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y - ir * 3);
+          ctx.lineTo(b.x + ir * 0.7, b.y - ir);
+          ctx.lineTo(b.x + ir * 0.4, b.y + ir * 1.5);
+          ctx.lineTo(b.x, b.y + ir * 2);
+          ctx.lineTo(b.x - ir * 0.4, b.y + ir * 1.5);
+          ctx.lineTo(b.x - ir * 0.7, b.y - ir);
+          ctx.closePath();
+          ctx.fill();
+          // Crystal edge highlights
+          ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y - ir * 3);
+          ctx.lineTo(b.x + ir * 0.7, b.y - ir);
+          ctx.moveTo(b.x, b.y - ir * 3);
+          ctx.lineTo(b.x - ir * 0.7, b.y - ir);
+          ctx.stroke();
+          // Bright tip
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = 0.9;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y - ir * 2.5, 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.restore();
+          continue;
         }
 
         if (b.type === 'blackhole') {
@@ -1593,22 +1659,50 @@
         }
 
         if (b.type === 'pulse') {
-          ctx.strokeStyle = `rgba(0,255,136,${b.alpha * 0.6})`;
-          ctx.lineWidth = 3;
+          // Outer glow ring
+          ctx.strokeStyle = `rgba(0,255,136,${b.alpha * 0.4})`;
+          ctx.lineWidth = 8;
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = '#00ff88';
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
           ctx.stroke();
-          ctx.fillStyle = `rgba(0,255,136,${b.alpha * 0.12})`;
+          // Sharp inner ring
+          ctx.strokeStyle = `rgba(0,255,136,${b.alpha * 0.8})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // Fill
+          ctx.fillStyle = `rgba(0,255,136,${b.alpha * 0.06})`;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
           continue;
         }
 
         if (b.type === 'wave') {
-          ctx.strokeStyle = `rgba(255,0,255,${b.alpha})`;
-          ctx.lineWidth = 4;
+          // Thick wavefront with trailing glow
+          ctx.shadowBlur = 25;
+          ctx.shadowColor = '#ff00ff';
+          // Outer glow
+          ctx.strokeStyle = `rgba(255,0,255,${b.alpha * 0.3})`;
+          ctx.lineWidth = 12;
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // Sharp core ring
+          ctx.strokeStyle = `rgba(255,180,255,${b.alpha})`;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // Inner fade ring
+          ctx.strokeStyle = `rgba(255,0,255,${b.alpha * 0.5})`;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius * 0.85, 0, Math.PI * 2);
           ctx.stroke();
           ctx.restore();
           continue;
@@ -1629,17 +1723,35 @@
             }
             ctx.globalAlpha = 1;
           }
-          // Main bullet - larger with glow
-          ctx.shadowBlur = 15;
+          // Crystal star - rotating 4-point star
+          const sAng = (b.hue || 0) * Math.PI / 180 + gameTime * 6;
+          const sr = b.r + 2;
+          ctx.shadowBlur = 18;
           ctx.shadowColor = b.color;
           ctx.fillStyle = b.color;
+          ctx.translate(b.x, b.y);
+          ctx.rotate(sAng);
           ctx.beginPath();
-          ctx.arc(b.x, b.y, b.r + 2, 0, Math.PI * 2);
+          for (let k = 0; k < 4; k++) {
+            const a = k * Math.PI / 2;
+            ctx.lineTo(Math.cos(a) * sr, Math.sin(a) * sr);
+            ctx.lineTo(Math.cos(a + Math.PI / 4) * sr * 0.35, Math.sin(a + Math.PI / 4) * sr * 0.35);
+          }
+          ctx.closePath();
           ctx.fill();
-          ctx.fillStyle = '#fff';
+          // White core diamond
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = 0.85;
           ctx.beginPath();
-          ctx.arc(b.x, b.y, b.r * 0.5, 0, Math.PI * 2);
+          const cr = sr * 0.3;
+          for (let k = 0; k < 4; k++) {
+            const a = k * Math.PI / 2;
+            ctx.lineTo(Math.cos(a) * cr, Math.sin(a) * cr);
+          }
+          ctx.closePath();
           ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.restore();
           continue;
         }
@@ -1655,25 +1767,41 @@
               ctx.fill();
             }
           }
-          // Boomerang V-shape with rotation
+          // Sleek angular boomerang with glow edges
           const rot = b.rotAngle || 0;
           ctx.translate(b.x, b.y);
           ctx.rotate(rot);
-          ctx.shadowBlur = 15;
-          ctx.shadowColor = '#ffff00';
-          ctx.fillStyle = '#ffff00';
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = '#ffaa00';
+          // Body
+          ctx.fillStyle = '#ffcc00';
           ctx.beginPath();
-          ctx.moveTo(0, -14);
-          ctx.lineTo(12, 6);
-          ctx.lineTo(4, 2);
-          ctx.lineTo(0, 10);
-          ctx.lineTo(-4, 2);
-          ctx.lineTo(-12, 6);
+          ctx.moveTo(0, -16);
+          ctx.lineTo(14, 0);
+          ctx.lineTo(8, 4);
+          ctx.lineTo(0, 12);
+          ctx.lineTo(-8, 4);
+          ctx.lineTo(-14, 0);
           ctx.closePath();
           ctx.fill();
+          // White edge highlights
           ctx.strokeStyle = '#ffffff';
           ctx.lineWidth = 1.5;
+          ctx.globalAlpha = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(0, -16);
+          ctx.lineTo(14, 0);
+          ctx.moveTo(0, -16);
+          ctx.lineTo(-14, 0);
           ctx.stroke();
+          ctx.globalAlpha = 1;
+          // Center energy core
+          ctx.fillStyle = '#ffffff';
+          ctx.globalAlpha = 0.9;
+          ctx.beginPath();
+          ctx.arc(0, 0, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
           ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.restore();
           continue;
@@ -4055,21 +4183,45 @@
       }
 
       // Weapon system indicator
-      ctx.fillStyle = '#aa8800';
-      ctx.font = '12px "Courier New", monospace';
-      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#ffcc00';
+      ctx.font = 'bold 12px "Courier New", monospace';
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = '#ffcc00';
       ctx.fillText(`WEAPON: ${WEAPON_NAMES[currentWeapon]}`, 20, 125);
-      ctx.fillText(`KILLS: ${killCount}/${KILLS_PER_WEAPON} UP`, 20, 142);
+      ctx.shadowBlur = 0;
+
+      // Kill progress bar (toward next weapon switch)
+      const killW = 80, killH = 6;
+      const killProg = killCount / KILLS_PER_WEAPON;
+      ctx.fillStyle = '#0a0a1a';
+      roundRect(ctx, 20, 132, killW, killH, 2);
+      ctx.fill();
+      if (killProg > 0) {
+        ctx.fillStyle = '#ffcc00';
+        ctx.globalAlpha = 0.7;
+        roundRect(ctx, 20, 132, killW * killProg, killH, 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      ctx.fillStyle = '#888';
+      ctx.font = '9px monospace';
+      ctx.fillText(`${killCount}/${KILLS_PER_WEAPON}`, 20 + killW + 6, 138);
 
       // Weapon CD indicator
       const cd = WEAPON_CDS[currentWeapon];
       if (cd > 0) {
         const elapsed = gameTime - lastWeaponFire[currentWeapon];
         const prog = Math.min(1, elapsed / cd);
-        ctx.fillStyle = '#333';
-        ctx.fillRect(20, 150, 80, 5);
-        ctx.fillStyle = prog >= 1 ? '#00ffff' : '#ff4444';
-        ctx.fillRect(20, 150, 80 * prog, 5);
+        ctx.fillStyle = '#0a0a1a';
+        roundRect(ctx, 20, 144, 80, 5, 2);
+        ctx.fill();
+        if (prog > 0) {
+          ctx.fillStyle = prog >= 1 ? '#00ffff' : '#ff4444';
+          ctx.globalAlpha = 0.7;
+          roundRect(ctx, 20, 144, 80 * prog, 5, 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
       }
 
       // Weapon upgrade banner
@@ -4173,25 +4325,42 @@
       // Positioned below the weapon display to avoid stacking
       const statusY = 160;
 
-      // Bomb cooldown indicator (moved left side, below other UI)
+      // Bomb cooldown indicator
       const bombY = statusY;
-      ctx.fillStyle = '#333';
-      ctx.fillRect(20, bombY, 80, 10);
-      ctx.strokeStyle = player.bombReady ? '#00ffff' : '#666';
+      const bombW = 80, bombH = 12;
+      ctx.fillStyle = '#0a0a1a';
+      roundRect(ctx, 20, bombY, bombW, bombH, 3);
+      ctx.fill();
+      ctx.strokeStyle = player.bombReady ? '#00ffff' : '#444';
       ctx.lineWidth = 1;
-      ctx.strokeRect(20, bombY, 80, 10);
+      roundRect(ctx, 20, bombY, bombW, bombH, 3);
+      ctx.stroke();
       if (player.bombReady) {
+        const bombPulse = 0.6 + Math.sin(time * 4) * 0.4;
         ctx.fillStyle = '#00ffff';
-        ctx.fillRect(22, bombY + 2, 76, 6);
+        ctx.globalAlpha = bombPulse;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#00ffff';
+        roundRect(ctx, 22, bombY + 2, bombW - 4, bombH - 4, 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
         ctx.fillStyle = '#000';
         ctx.font = 'bold 9px monospace';
-        ctx.fillText('BOMB', 25, bombY + 8);
+        ctx.fillText('BOMB', 30, bombY + 9);
       } else {
-        ctx.fillStyle = '#00aaff';
-        ctx.fillRect(22, bombY + 2, 76 * (1 - player.bombCooldown / BOMB_COOLDOWN), 6);
+        const bombProg = 1 - player.bombCooldown / BOMB_COOLDOWN;
+        const bombFill = (bombW - 4) * bombProg;
+        if (bombFill > 0) {
+          ctx.fillStyle = '#00aaff';
+          ctx.globalAlpha = 0.6;
+          roundRect(ctx, 22, bombY + 2, bombFill, bombH - 4, 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
         ctx.fillStyle = '#888';
-        ctx.font = '10px monospace';
-        ctx.fillText(`${Math.ceil(player.bombCooldown)}s`, 45, bombY + 8);
+        ctx.font = '9px monospace';
+        ctx.fillText(`${Math.ceil(player.bombCooldown)}s`, 38, bombY + 9);
       }
 
       // Controls help (compact, bottom left corner)
@@ -4205,7 +4374,7 @@
         const barX = canvas.width - 220;
         const barY = 14;
         const barW = 210;
-        const barH = 28;
+        const barH = 22;
 
         // BOSS name with glow (pulsing)
         ctx.save();
@@ -4223,14 +4392,17 @@
         ctx.globalAlpha = 1;
         ctx.restore();
 
-        // Health bar background with border
-        ctx.fillStyle = '#0a0a1a';
-        ctx.fillRect(barX, barY + 4, barW, barH);
-        ctx.strokeStyle = boss.color + '66';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(barX, barY + 4, barW, barH);
+        // Health bar background - rounded with inner shadow
+        ctx.fillStyle = '#080810';
+        roundRect(ctx, barX, barY + 4, barW, barH, 3);
+        ctx.fill();
+        // Inner border glow
+        ctx.strokeStyle = boss.color + '33';
+        ctx.lineWidth = 1;
+        roundRect(ctx, barX, barY + 4, barW, barH, 3);
+        ctx.stroke();
 
-        // Health bar damage trail (the darker portion showing damage)
+        // Health bar damage trail
         const hpPercent = Math.max(0, displayHp / boss.maxHp);
         const targetPercent = Math.max(0, boss.hp / boss.maxHp);
 
@@ -4238,42 +4410,65 @@
         if (uiFlashTimer > 0) {
           uiFlashTimer -= 0.016;
           ctx.fillStyle = uiFlashColor;
-          ctx.globalAlpha = 0.3 * (uiFlashTimer / 0.2);
-          ctx.fillRect(barX + 2, barY + 6, barW - 4, barH - 4);
+          ctx.globalAlpha = 0.4 * (uiFlashTimer / 0.2);
+          roundRect(ctx, barX + 2, barY + 6, barW - 4, barH - 4, 2);
+          ctx.fill();
           ctx.globalAlpha = 1;
         }
 
-        // Health bar gradient fill (animated shimmer)
-        const healthGradient = ctx.createLinearGradient(barX, 0, barX + barW * hpPercent, 0);
-        healthGradient.addColorStop(0, boss.color);
-        healthGradient.addColorStop(0.5, boss.color + 'cc');
-        healthGradient.addColorStop(1, boss.color);
-
-        ctx.fillStyle = healthGradient;
-        ctx.shadowBlur = 15;
-        ctx.shadowColor = boss.color;
-
-        // Smooth health transition
+        // Health bar fill with layered gradient
         const fillW = (barW - 4) * hpPercent;
-        ctx.fillRect(barX + 2, barY + 6, fillW, barH - 4);
-        ctx.shadowBlur = 0;
-
-        // Health bar shine effect (animated)
-        ctx.save();
-        const shineX = barX + 2 + (time * 100 % (barW + 60)) - 60;
-        const gradient = ctx.createLinearGradient(shineX - 30, 0, shineX + 30, 0);
-        gradient.addColorStop(0, 'transparent');
-        gradient.addColorStop(0.5, 'rgba(255,255,255,0.3)');
-        gradient.addColorStop(1, 'transparent');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(barX + 2, barY + 6, fillW, barH - 4);
-        ctx.restore();
+        if (fillW > 0) {
+          // Bottom dark layer
+          const darkGrad = ctx.createLinearGradient(barX, barY + 6, barX, barY + barH);
+          darkGrad.addColorStop(0, boss.color + '88');
+          darkGrad.addColorStop(1, boss.color + '33');
+          ctx.fillStyle = darkGrad;
+          roundRect(ctx, barX + 2, barY + 6, fillW, barH - 4, 2);
+          ctx.fill();
+          // Top bright layer
+          const healthGrad = ctx.createLinearGradient(barX, barY + 6, barX, barY + 6 + (barH - 4) * 0.5);
+          healthGrad.addColorStop(0, '#ffffff44');
+          healthGrad.addColorStop(1, 'transparent');
+          ctx.fillStyle = healthGrad;
+          roundRect(ctx, barX + 2, barY + 6, fillW, (barH - 4) * 0.5, 2);
+          ctx.fill();
+          // Main color fill
+          ctx.fillStyle = boss.color;
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = boss.color;
+          ctx.globalAlpha = 0.7;
+          roundRect(ctx, barX + 2, barY + 6, fillW, barH - 4, 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.globalAlpha = 1;
+          // Animated shine sweep
+          const shineX = barX + 2 + (time * 120 % (barW + 80)) - 80;
+          const shineGrad = ctx.createLinearGradient(shineX - 40, 0, shineX + 40, 0);
+          shineGrad.addColorStop(0, 'transparent');
+          shineGrad.addColorStop(0.5, 'rgba(255,255,255,0.25)');
+          shineGrad.addColorStop(1, 'transparent');
+          ctx.save();
+          ctx.beginPath();
+          roundRect(ctx, barX + 2, barY + 6, fillW, barH - 4, 2);
+          ctx.clip();
+          ctx.fillStyle = shineGrad;
+          ctx.fillRect(barX, barY + 4, barW, barH);
+          ctx.restore();
+          // Low health pulse warning
+          if (hpPercent < 0.3 && hpPercent > 0) {
+            const pulse = 0.3 + Math.sin(time * 8) * 0.3;
+            ctx.fillStyle = `rgba(255,50,50,${pulse})`;
+            roundRect(ctx, barX + 2, barY + 6, fillW, barH - 4, 2);
+            ctx.fill();
+          }
+        }
 
         // HP numbers
-        ctx.fillStyle = '#aaa';
+        ctx.fillStyle = '#999';
         ctx.font = '11px monospace';
         ctx.textAlign = 'right';
-        ctx.fillText(`${Math.ceil(boss.hp)} / ${boss.maxHp}`, barX + barW - 4, barY + barH + 11);
+        ctx.fillText(`${Math.ceil(boss.hp)} / ${boss.maxHp}`, barX + barW - 4, barY + barH + 12);
         ctx.textAlign = 'left';
 
         // Critical health warning (low HP flicker)
@@ -4825,6 +5020,20 @@
         ctx.fillRect(p.x, p.y, 3, 3);
       }
       ctx.globalAlpha = 1;
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.arcTo(x + w, y, x + w, y + r, r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+      ctx.lineTo(x + r, y + h);
+      ctx.arcTo(x, y + h, x, y + h - r, r);
+      ctx.lineTo(x, y + r);
+      ctx.arcTo(x, y, x + r, y, r);
+      ctx.closePath();
     }
 
     function renderBackground() {
