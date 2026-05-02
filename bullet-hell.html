@@ -41,43 +41,39 @@
     const DG_WS_URL = 'ws://192.168.10.104:5679';
     let dgWs = null;
     let dgConnected = false;
+    let dgRetryCount = 0;
 
     function connectDG() {
+        if (dgRetryCount >= 3) return; // Stop retrying after 3 failures
         try {
             dgWs = new WebSocket(DG_WS_URL);
             dgWs.onopen = () => {
                 console.log('[DG] Connected');
                 dgConnected = true;
+                dgRetryCount = 0;
             };
             dgWs.onclose = () => {
-                console.log('[DG] Disconnected');
                 dgConnected = false;
-                // Reconnect after 3s
-                setTimeout(connectDG, 3000);
+                dgRetryCount++;
+                if (dgRetryCount < 3) setTimeout(connectDG, 5000);
             };
-            dgWs.onerror = (e) => console.log('[DG] Error', e);
-        } catch(e) {
-            console.log('[DG] Connect error', e);
-        }
+            dgWs.onerror = () => {};
+        } catch(e) {}
     }
     connectDG();
 
     function dgVibrate(channel, intensity) {
-        console.log('[DG] Vibrate:', channel, intensity);
         if (dgWs && dgConnected && dgWs.readyState === WebSocket.OPEN) {
+            console.log('[DG] Vibrate:', channel, intensity);
             dgWs.send(JSON.stringify({
                 type: 'vibrate',
                 channel: channel,
                 intensity: intensity
             }));
-        } else {
-            console.log('[DG] Not connected, dgWs:', !!dgWs, 'dgConnected:', dgConnected);
         }
     }
 
     function dgHit() {
-        // 发送波形 - 玩家受击（双通道）
-        console.log('[DG] Hit pulse: A+B');
         if (dgWs && dgConnected && dgWs.readyState === WebSocket.OPEN) {
             dgWs.send(JSON.stringify({ type: 'hit', channel: 'A' }));
             dgWs.send(JSON.stringify({ type: 'hit', channel: 'B' }));
@@ -123,18 +119,30 @@
     // ==================== Weapon System ====================
     const WEAPON_COUNT = 10;
     const KILLS_PER_WEAPON = 3;
-    let currentWeapon = 1; // Start with Homing Rocket (single-shot)
+    let currentWeapon = 0; // Start with Straight Shot (single-shot)
     let killCount = 0;
     let weaponSwitchTimer = 0;
     const WEAPON_SWITCH_DISPLAY_TIME = 1.5;
 
     const WEAPON_NAMES = [
-      'Spread Shot', 'Homing Rocket', 'Boomerang', 'Energy Pulse', 'Spiral Barrage',
-      'Lightning Ring', 'Wave Cannon', 'Ice Spike', 'Black Hole', 'Time Pendulum'
+      'Straight Shot', 'Spread Shot', 'Homing Rocket', 'Boomerang', 'Energy Pulse',
+      'Spiral Barrage', 'Lightning Ring', 'Wave Cannon', 'Ice Spike', 'Black Hole'
     ];
 
-    const WEAPON_CDS = [0, 2, 1.5, 2, 0, 3, 4, 2, 3, 2];
+    const WEAPON_CDS = [0, 0, 0.67, 1.5, 2, 0, 3, 4, 2, 3];
     let lastWeaponFire = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let upgradeParticles = [];
+    let iceExplosions = [];
+
+    function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+    function hslToHex(h, s, l) {
+      s /= 100; l /= 100;
+      const a = s * Math.min(l, 1 - l);
+      const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1); };
+      const toHex = x => Math.round(x * 255).toString(16).padStart(2, '0');
+      return `#${toHex(f(0))}${toHex(f(8))}${toHex(f(4))}`;
+    }
 
     // Ice freeze states
     let bossFrozen = false;
@@ -1232,6 +1240,7 @@
         const b = bullets[i];
         b.x += b.vx * dt;
         b.y += b.vy * dt;
+        if (b.bossHitCD > 0) b.bossHitCD -= dt;
 
         // Portal teleportation
         if (boss.portals.length > 0) {
@@ -1258,8 +1267,16 @@
             const dx = target.x - b.x, dy = target.y - b.y;
             const d = Math.sqrt(dx*dx + dy*dy);
             if (d > 0) {
-              b.vx += (dx / d) * 300 * dt;
-              b.vy += (dy / d) * 300 * dt;
+              const steerForce = 1200;
+              b.vx += (dx / d) * steerForce * dt;
+              b.vy += (dy / d) * steerForce * dt;
+              // Cap speed so it doesn't overshoot
+              const speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+              const maxSpeed = 500;
+              if (speed > maxSpeed) {
+                b.vx = (b.vx / speed) * maxSpeed;
+                b.vy = (b.vy / speed) * maxSpeed;
+              }
             }
           }
           // Trail
@@ -1269,26 +1286,67 @@
           for (const t of b.trail) t.alpha -= dt * 3;
         }
 
+        // Spiral trail
+        if (b.type === 'spiral' && b.trail) {
+          b.trail.push({ x: b.x, y: b.y, alpha: 0.5 });
+          if (b.trail.length > 12) b.trail.shift();
+          for (const t of b.trail) t.alpha -= dt * 2;
+        }
+
         // Boomerang - arc movement
         if (b.type === 'boomerang') {
           b.time += dt;
           const prog = b.time / b.duration;
           if (prog >= 1) { bullets.splice(i, 1); continue; }
-          const t = prog * Math.PI * 2;
-          b.x = b.originX + Math.sin(t) * 200;
-          b.y = b.originY + Math.sin(t * 2) * 100 - prog * 200;
+          // Rotate
+          b.rotAngle = (b.rotAngle || 0) + dt * 15;
+          // Fly toward boss for first half, return to player for second half
+          const speed = 350;
+          if (prog < 0.5) {
+            if (boss.active) {
+              const dx = boss.x - b.x, dy = boss.y - b.y;
+              const d = Math.sqrt(dx*dx + dy*dy) || 1;
+              b.vx += (dx / d) * speed * 2 * dt;
+              b.vy += (dy / d) * speed * 2 * dt;
+            }
+          } else {
+            const dx = b.originX - b.x, dy = b.originY - b.y;
+            const d = Math.sqrt(dx*dx + dy*dy) || 1;
+            b.vx += (dx / d) * speed * 3 * dt;
+            b.vy += (dy / d) * speed * 3 * dt;
+          }
+          const spd = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+          if (spd > speed) { b.vx *= speed/spd; b.vy *= speed/spd; }
+          // Trail
+          if (!b.trail) b.trail = [];
+          b.trail.push({x: b.x, y: b.y, alpha: 0.6});
+          if (b.trail.length > 8) b.trail.shift();
+          for (const t of b.trail) t.alpha -= dt * 1.5;
         }
 
-        // Energy pulse - expanding
+        // Energy pulse - expanding + destroy enemy bullets
         if (b.type === 'pulse') {
           if (b.expanding) {
             b.radius += 400 * dt;
             b.alpha = 1 - b.radius / b.maxRadius;
-            if (b.radius >= b.maxRadius) { bullets.splice(i, 1); }
+            if (b.radius >= b.maxRadius) { bullets.splice(i, 1); continue; }
+            if (b.destroysBullets) {
+              for (let j = bullets.length - 1; j >= 0; j--) {
+                const e = bullets[j];
+                if (e.owner === 'boss') {
+                  const dx = e.x - b.x, dy = e.y - b.y;
+                  const dist = Math.sqrt(dx*dx + dy*dy);
+                  if (Math.abs(dist - b.radius) < 20) {
+                    bullets.splice(j, 1);
+                    if (j <= i) i--;
+                  }
+                }
+              }
+            }
           }
         }
 
-        // Lightning ring - expand + bolts
+        // Lightning ring - expand + bolts + destroy bullets
         if (b.type === 'lightning') {
           b.radius += 350 * dt;
           b.alpha = 1 - b.radius / b.maxRadius;
@@ -1306,47 +1364,112 @@
             b.bolts[j].life -= dt;
             if (b.bolts[j].life <= 0) b.bolts.splice(j, 1);
           }
-          if (b.radius >= b.maxRadius) { bullets.splice(i, 1); }
-        }
-
-        // Wave cannon - expanding
-        if (b.type === 'wave') {
-          b.radius += 500 * dt;
-          b.alpha = 1 - b.radius / b.maxRadius;
-          if (b.radius >= b.maxRadius) { bullets.splice(i, 1); }
-        }
-
-        // Ice spike - freeze on hit
-        if (b.type === 'ice' && !b.frozen) {
-          if (boss.active) {
-            const dx = b.x - boss.x, dy = b.y - boss.y;
-            if (Math.sqrt(dx*dx + dy*dy) < boss.r + 10) {
-              b.frozen = true;
-              bossFrozen = true;
-              // Find the player who fired this to get power level
-              const firingPlayer = players.find(p => p.active) || player;
-              bossFreezeTimer = 0.5 + firingPlayer.power * 0.1;
+          if (b.radius >= b.maxRadius) { bullets.splice(i, 1); continue; }
+          if (b.destroysBullets) {
+            for (let j = bullets.length - 1; j >= 0; j--) {
+              const e = bullets[j];
+              if (e.owner === 'boss') {
+                const dx = e.x - b.x, dy = e.y - b.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (Math.abs(dist - b.radius) < 25) {
+                  bullets.splice(j, 1);
+                  if (j <= i) i--;
+                }
+              }
             }
           }
         }
 
-        // Black hole - gravity pull + explosion
+        // Wave cannon - expanding + destroy bullets
+        if (b.type === 'wave') {
+          b.radius += 500 * dt;
+          b.alpha = 1 - b.radius / b.maxRadius;
+          if (b.radius >= b.maxRadius) { bullets.splice(i, 1); continue; }
+          if (b.destroysBullets) {
+            for (let j = bullets.length - 1; j >= 0; j--) {
+              const e = bullets[j];
+              if (e.owner === 'boss') {
+                const dx = e.x - b.x, dy = e.y - b.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (Math.abs(dist - b.radius) < 25) {
+                  bullets.splice(j, 1);
+                  if (j <= i) i--;
+                }
+              }
+            }
+          }
+        }
+
+        // Ice spike - freeze on hit + pentagram
+        if (b.type === 'ice' && !b.frozen) {
+          if (boss.active) {
+            const dx = b.x - boss.x, dy = b.y - boss.y;
+            if (Math.sqrt(dx*dx + dy*dy) < boss.r + 15) {
+              b.frozen = true;
+              bossFrozen = true;
+              const firingPlayer = players.find(p => p.active) || player;
+              bossFreezeTimer = 0.5 + firingPlayer.power * 0.1;
+              // Spawn ice pentagram
+              iceExplosions.push({
+                x: boss.x, y: boss.y, life: 1.2, maxLife: 1.2,
+                rotation: 0, radius: 60
+              });
+              spawnExplosion(boss.x, boss.y, '#00ddff', 20);
+            }
+          }
+        }
+
+        // Black hole - gravity pull + explode on boss + absorb bullets
         if (b.type === 'blackhole') {
           b.time += dt;
-          if (b.time >= b.duration) {
-            if (!b.exploding) { b.exploding = true; b.vx = b.vy = 0; }
+          if (b.exploding) {
             b.radius += (b.explosionRadius - b.radius) * dt * 5;
-            if (b.radius >= b.explosionRadius * 0.9) { bullets.splice(i, 1); }
+            if (b.radius >= b.explosionRadius * 0.9) { bullets.splice(i, 1); continue; }
+            // Explosion destroys nearby boss bullets
+            for (let j = bullets.length - 1; j >= 0; j--) {
+              const e = bullets[j];
+              if (e.owner === 'boss') {
+                const dx = e.x - b.x, dy = e.y - b.y;
+                if (Math.sqrt(dx*dx + dy*dy) < b.radius) {
+                  bullets.splice(j, 1);
+                  if (j <= i) i--;
+                }
+              }
+            }
+          } else if (b.time >= b.duration) {
+            b.exploding = true; b.vx = b.vy = 0;
+            triggerScreenShake(4, 0.1);
+            spawnExplosion(b.x, b.y, '#6600ff', 30);
           } else {
-            // Pull enemy bullets
+            // Move toward boss
+            if (boss.active) {
+              const dx = boss.x - b.x, dy = boss.y - b.y;
+              const d = Math.sqrt(dx*dx + dy*dy);
+              // Explode on boss contact
+              if (d < boss.r + 20) {
+                b.exploding = true; b.vx = b.vy = 0;
+                triggerScreenShake(5, 0.15);
+                spawnExplosion(b.x, b.y, '#6600ff', 40);
+              } else {
+                b.vx += (dx / d) * 300 * dt;
+                b.vy += (dy / d) * 300 * dt;
+                const speed = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+                if (speed > 300) { b.vx *= 300/speed; b.vy *= 300/speed; }
+              }
+            }
+            // Pull and absorb enemy bullets
             for (let j = bullets.length - 1; j >= 0; j--) {
               const e = bullets[j];
               if (e.owner === 'boss') {
                 const dx = b.x - e.x, dy = b.y - e.y;
                 const dist = Math.sqrt(dx*dx + dy*dy);
-                if (dist < b.gravityRadius && dist > 0) {
-                  e.vx += (dx / dist) * 300 * dt;
-                  e.vy += (dy / dist) * 300 * dt;
+                if (dist < 30) {
+                  // Absorb
+                  bullets.splice(j, 1);
+                  if (j <= i) i--;
+                } else if (dist < b.gravityRadius) {
+                  e.vx += (dx / dist) * 600 * dt;
+                  e.vy += (dy / dist) * 600 * dt;
                 }
               }
             }
@@ -1426,21 +1549,56 @@
 
         if (b.type === 'blackhole') {
           // Black hole glow
-          ctx.shadowBlur = 20;
+          const bhAlpha = b.exploding ? 1 : (0.8 + Math.sin(gameTime * 8) * 0.2);
+          ctx.globalAlpha = bhAlpha;
+          // Gravity radius indicator
+          if (!b.exploding) {
+            ctx.strokeStyle = 'rgba(102,0,255,0.15)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, b.gravityRadius, 0, Math.PI * 2);
+            ctx.stroke();
+            // Swirl rings
+            const t = gameTime * 4;
+            for (let s = 0; s < 3; s++) {
+              const sr = b.gravityRadius * (0.3 + s * 0.25);
+              ctx.strokeStyle = `rgba(102,0,255,${0.2 - s * 0.05})`;
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              for (let a = 0; a < Math.PI * 2; a += 0.1) {
+                const wobble = Math.sin(a * 3 + t + s) * 8;
+                const px = b.x + Math.cos(a) * (sr + wobble);
+                const py = b.y + Math.sin(a) * (sr + wobble);
+                if (a === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+              }
+              ctx.closePath();
+              ctx.stroke();
+            }
+          }
+          // Core
+          const coreR = b.exploding ? b.radius : b.r;
+          const gradient = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, coreR);
+          gradient.addColorStop(0, '#ffffff');
+          gradient.addColorStop(0.3, '#6600ff');
+          gradient.addColorStop(1, 'rgba(102,0,255,0)');
+          ctx.fillStyle = gradient;
+          ctx.shadowBlur = 25;
           ctx.shadowColor = '#6600ff';
-          ctx.fillStyle = '#6600ff';
-          ctx.globalAlpha = b.alpha || 1;
           ctx.beginPath();
-          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.arc(b.x, b.y, coreR, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
           continue;
         }
 
         if (b.type === 'pulse') {
-          ctx.fillStyle = `rgba(0,255,136,${b.alpha})`;
+          ctx.strokeStyle = `rgba(0,255,136,${b.alpha * 0.6})`;
+          ctx.lineWidth = 3;
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = `rgba(0,255,136,${b.alpha * 0.12})`;
           ctx.fill();
           ctx.restore();
           continue;
@@ -1452,6 +1610,71 @@
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
           ctx.stroke();
+          ctx.restore();
+          continue;
+        }
+
+        if (b.type === 'spiral') {
+          // Trail
+          if (b.trail) {
+            for (let j = 0; j < b.trail.length; j++) {
+              const t = b.trail[j];
+              if (t.alpha <= 0) continue;
+              const trailHue = (b.hue + j * 5) % 360;
+              ctx.fillStyle = hslToHex(trailHue, 100, 60);
+              ctx.globalAlpha = t.alpha * 0.4;
+              ctx.beginPath();
+              ctx.arc(t.x, t.y, 4 * (j / b.trail.length), 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+          }
+          // Main bullet - larger with glow
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = b.color;
+          ctx.fillStyle = b.color;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r + 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r * 0.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          continue;
+        }
+
+        if (b.type === 'boomerang') {
+          // Trail
+          if (b.trail) {
+            for (const t of b.trail) {
+              if (t.alpha <= 0) continue;
+              ctx.fillStyle = `rgba(255,255,0,${t.alpha * 0.3})`;
+              ctx.beginPath();
+              ctx.arc(t.x, t.y, 6, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          // Boomerang V-shape with rotation
+          const rot = b.rotAngle || 0;
+          ctx.translate(b.x, b.y);
+          ctx.rotate(rot);
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = '#ffff00';
+          ctx.fillStyle = '#ffff00';
+          ctx.beginPath();
+          ctx.moveTo(0, -14);
+          ctx.lineTo(12, 6);
+          ctx.lineTo(4, 2);
+          ctx.lineTo(0, 10);
+          ctx.lineTo(-4, 2);
+          ctx.lineTo(-12, 6);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.restore();
           continue;
         }
@@ -1741,11 +1964,11 @@
     let bossIndex = 0;
     let waveCount = 1;
     const HP_BASE = 200;
-    const HP_INCREMENT = 100;
+    const HP_INCREMENT = 50;
 
     function startBoss() {
-      const waveMultiplier = Math.floor(waveCount / 3);
-      const hp = Math.floor((HP_BASE + waveCount * HP_INCREMENT) * (1 + waveMultiplier * 0.3));
+      const waveMultiplier = Math.floor(waveCount / 5);
+      const hp = Math.floor((HP_BASE + waveCount * HP_INCREMENT) * (1 + waveMultiplier * 0.15));
 
       boss.hp = boss.maxHp = hp;
       displayHp = hp;
@@ -1912,7 +2135,9 @@
       boss.cooldown -= dt;
       if (boss.cooldown <= 0) {
         fireBossPattern();
-        boss.cooldown = Math.max(0.15, 0.5 - waveCount * 0.02);
+        let cd = Math.max(0.15, 0.5 - waveCount * 0.02);
+        if (screenRotationActive) cd *= 3; // Reduce fire rate during rotation attack
+        boss.cooldown = cd;
       }
     }
 
@@ -2172,16 +2397,37 @@
     }
 
     // ============ WEAPON SYSTEM ============
+    // Helper: get aim angle toward boss (defaults straight up)
+    function aimAtBoss(p) {
+      if (!boss.active) return -Math.PI / 2;
+      const dx = boss.x - p.x, dy = boss.y - p.y;
+      if (dx * dx + dy * dy < 1) return -Math.PI / 2;
+      return Math.atan2(dy, dx);
+    }
+
+    function fireStraightShot(p) {
+      const speed = 500 + p.power * 30;
+      const ang = aimAtBoss(p);
+      bullets.push({
+        x: p.x, y: p.y - 20,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed,
+        r: 6, owner: 'player', type: 'spread', dmg: 3,
+        color: p.power >= 2 ? '#00ffff' : '#00aaff'
+      });
+    }
+
     function fireSpreadShot(p) {
-      const baseSpeed = -400 - p.power * 30;
+      const speed = 400 + p.power * 30;
+      const baseAng = aimAtBoss(p);
       const angles = p.power >= 2 ? [-30, -15, 0, 15, 30] : [-15, 0, 15];
-      for (const a of angles) {
-        const rad = a * Math.PI / 180;
+      for (const offset of angles) {
+        const ang = baseAng + offset * Math.PI / 180;
         bullets.push({
           x: p.x, y: p.y - 20,
-          vx: Math.sin(rad) * baseSpeed * 0.3,
-          vy: Math.cos(rad) * baseSpeed,
-          r: 5, owner: 'player', type: 'spread',
+          vx: Math.cos(ang) * speed,
+          vy: Math.sin(ang) * speed,
+          r: 5, owner: 'player', type: 'spread', dmg: 1,
           color: p.power >= 2 ? '#00ffff' : '#00aaff'
         });
       }
@@ -2202,16 +2448,20 @@
       bullets.push({
         x: p.x, y: p.y - 20, vx, vy, r: 8,
         owner: 'player', type: 'homing', color: '#ff4444',
-        trail: []
+        trail: [], dmg: 10
       });
     }
 
     function fireBoomerang(p) {
+      const ang = aimAtBoss(p);
+      const speed = 300;
       bullets.push({
-        x: p.x, y: p.y - 30, vx: -100, vy: -150, r: 10,
-        owner: 'player', type: 'boomerang', color: '#ffff00',
+        x: p.x, y: p.y - 30,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed,
+        r: 10, owner: 'player', type: 'boomerang', color: '#ffff00',
         phase: 0, originX: p.x, originY: p.y,
-        time: 0, duration: 2.0
+        time: 0, duration: 2.0, dmg: 22
       });
     }
 
@@ -2222,8 +2472,8 @@
           bullets.push({
             x: p.x, y: p.y, vx: 0, vy: 0, r: 10,
             owner: 'player', type: 'pulse', color: '#00ff88',
-            radius: 10, maxRadius: 500 + p.power * 50,
-            expanding: true, alpha: 1
+            radius: 10, maxRadius: 800 + p.power * 80,
+            expanding: true, alpha: 1, dmg: 15, destroysBullets: true
           });
         }, r * 100);
       }
@@ -2236,12 +2486,14 @@
       for (let a = 0; a < arms; a++) {
         const ang = spiralAngle + a * 360 / arms;
         const rad = ang * Math.PI / 180;
+        const hue = ((ang % 360) + 360) % 360;
+        const c = hslToHex(hue, 100, 60);
         bullets.push({
           x: p.x, y: p.y - 15,
-          vx: Math.sin(rad) * 80,
-          vy: -350, r: 4,
-          owner: 'player', type: 'spiral',
-          color: `hsl${((ang%360)+360)%360},100%,60%`
+          vx: Math.sin(rad) * 120,
+          vy: -420 + Math.cos(rad) * 30,
+          r: 5, owner: 'player', type: 'spiral', dmg: 3,
+          color: c, hue: hue, trail: []
         });
       }
     }
@@ -2250,8 +2502,8 @@
       bullets.push({
         x: p.x, y: p.y, vx: 0, vy: 0, r: 15,
         owner: 'player', type: 'lightning', color: '#ffffff',
-        radius: 20, maxRadius: 500, expanding: true,
-        alpha: 1, bolts: [], boltTimer: 0
+        radius: 20, maxRadius: 800, expanding: true,
+        alpha: 1, bolts: [], boltTimer: 0, dmg: 45, destroysBullets: true
       });
     }
 
@@ -2265,23 +2517,28 @@
         bullets.push({
           x: p.x, y: p.y, vx: 0, vy: 0, r: 20,
           owner: 'player', type: 'wave', color: '#ff00ff',
-          radius: 30, maxRadius: 600 + p.power * 60,
-          expanding: true, alpha: 1
+          radius: 30, maxRadius: 900 + p.power * 80,
+          expanding: true, alpha: 1, dmg: 60, destroysBullets: true
         });
       }
       p.lastFireTime = gameTime;
     }
 
     function fireIceSpike(p) {
-      const ang = -Math.PI / 2;
-      bullets.push({
-        x: p.x, y: p.y - 20,
-        vx: Math.sin(ang) * 100,
-        vy: Math.cos(ang) * -450,
-        r: 6, owner: 'player',
-        type: 'ice', color: '#00ddff',
-        frozen: false
-      });
+      const ang = aimAtBoss(p);
+      const speed = 500;
+      const count = p.power >= 2 ? 3 : 2;
+      for (let i = 0; i < count; i++) {
+        const offset = (i - (count - 1) / 2) * 8 * Math.PI / 180;
+        bullets.push({
+          x: p.x, y: p.y - 20,
+          vx: Math.cos(ang + offset) * speed,
+          vy: Math.sin(ang + offset) * speed,
+          r: 6, owner: 'player',
+          type: 'ice', color: '#00ddff',
+          frozen: false, dmg: 60
+        });
+      }
     }
 
     function fireBlackHole(p) {
@@ -2290,7 +2547,7 @@
         owner: 'player', type: 'blackhole', color: '#6600ff',
         radius: 20, maxRadius: 100, gravityRadius: 120,
         active: true, time: 0, duration: 2.0 + p.power * 0.3,
-        exploding: false, explosionRadius: 150
+        exploding: false, explosionRadius: 150, dmg: 45
       });
     }
 
@@ -2308,9 +2565,9 @@
 
     function fireWeapon(weaponIndex, player) {
       const weapons = [
-        fireSpreadShot, fireHomingRocket, fireBoomerang,
-        fireEnergyPulse, fireSpiralShot, fireLightningRing,
-        fireWaveCannon, fireIceSpike, fireBlackHole, fireTimePendulum
+        fireStraightShot, fireSpreadShot, fireHomingRocket,
+        fireBoomerang, fireEnergyPulse, fireSpiralShot,
+        fireLightningRing, fireWaveCannon, fireIceSpike, fireBlackHole
       ];
       weapons[weaponIndex](player);
     }
@@ -3680,12 +3937,22 @@
 
       for (let i = bullets.length - 1; i >= 0; i--) {
         const b = bullets[i];
-        if (b.owner === 'player' && circleCollision(b, boss)) {
-          bullets.splice(i, 1);
-          boss.hp -= 10;
+        // Expanding bullets and blackhole explosion use their radius for collision
+        const hitR = (b.expanding || (b.type === 'blackhole' && b.exploding)) ? b.radius : b.r;
+        if (hitR <= 0) continue;
+        // Expanding bullets have damage cooldown
+        if ((b.expanding || b.type === 'blackhole') && b.bossHitCD > 0) continue;
+        if (b.owner === 'player' && circleCollision({x: b.x, y: b.y, r: hitR}, boss)) {
+          const dmg = b.dmg || 10;
+          if (b.expanding || b.type === 'blackhole') {
+            b.bossHitCD = 0.2; // Damage every 0.2s max
+          } else {
+            bullets.splice(i, 1);
+          }
+          boss.hp -= dmg;
           boss.hp = Math.max(0, boss.hp);
-          score += 10;
-          spawnScorePopup(boss.x, boss.y - 30, 10);
+          score += dmg;
+          spawnScorePopup(boss.x, boss.y - 30, dmg);
           addCombo();
           triggerScreenShake(2, 0.05);
           if (Math.random() < 0.2) dgVibrate('A', 20 + combo * 2); // 击中Boss时轻微震动
@@ -3703,6 +3970,7 @@
               currentWeapon = (currentWeapon + 1) % WEAPON_COUNT;
               weaponSwitchTimer = WEAPON_SWITCH_DISPLAY_TIME;
               lastWeaponFire = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+              spawnUpgradeParticles(player.x, player.y);
             }
 
             spawnExplosion(boss.x, boss.y, boss.color, 50);
@@ -3796,18 +4064,69 @@
         ctx.fillRect(20, 150, 80 * prog, 5);
       }
 
-      // Weapon switch flash
+      // Weapon upgrade banner
       if (weaponSwitchTimer > 0) {
-        const alpha = Math.min(1, weaponSwitchTimer / 0.3);
-        ctx.fillStyle = `rgba(255,255,255,${alpha * 0.3})`;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.font = 'bold 48px "Courier New", monospace';
+        const duration = WEAPON_SWITCH_DISPLAY_TIME;
+        const elapsed = duration - weaponSwitchTimer;
+        const bannerH = 80;
+        // Slide in over 0.2s, hold, slide out over 0.3s
+        let bannerAlpha, bannerY;
+        if (elapsed < 0.2) {
+          // Slide in
+          const t = elapsed / 0.2;
+          bannerAlpha = t;
+          bannerY = canvas.height - bannerH * easeOutCubic(t);
+        } else if (weaponSwitchTimer < 0.3) {
+          // Slide out
+          const t = weaponSwitchTimer / 0.3;
+          bannerAlpha = t;
+          bannerY = canvas.height - bannerH * easeOutCubic(t);
+        } else {
+          bannerAlpha = 1;
+          bannerY = canvas.height - bannerH;
+        }
+
+        // Banner background
+        const grad = ctx.createLinearGradient(0, bannerY, 0, bannerY + bannerH);
+        grad.addColorStop(0, `rgba(0,20,40,${bannerAlpha * 0.9})`);
+        grad.addColorStop(1, `rgba(0,0,0,${bannerAlpha * 0.95})`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, bannerY, canvas.width, bannerH);
+
+        // Top border glow
+        ctx.strokeStyle = `rgba(0,255,255,${bannerAlpha * 0.8})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, bannerY);
+        ctx.lineTo(canvas.width, bannerY);
+        ctx.stroke();
+
+        // Weapon name
+        ctx.save();
         ctx.textAlign = 'center';
         ctx.shadowColor = '#00ffff';
-        ctx.shadowBlur = 20;
-        ctx.fillStyle = `rgba(0,255,255,${alpha})`;
-        ctx.fillText(WEAPON_NAMES[currentWeapon], canvas.width / 2, canvas.height / 2);
-        ctx.textAlign = 'left';
+        ctx.shadowBlur = 15;
+        ctx.font = 'bold 28px "Courier New", monospace';
+        ctx.fillStyle = `rgba(0,255,255,${bannerAlpha})`;
+        ctx.fillText('NEW WEAPON', canvas.width / 2, bannerY + 30);
+        ctx.shadowBlur = 8;
+        ctx.font = 'bold 22px "Courier New", monospace';
+        ctx.fillStyle = `rgba(255,255,255,${bannerAlpha})`;
+        ctx.fillText(WEAPON_NAMES[currentWeapon], canvas.width / 2, bannerY + 58);
+        ctx.restore();
+
+        // Side accent lines
+        const lineW = 200 * bannerAlpha;
+        ctx.strokeStyle = `rgba(0,255,255,${bannerAlpha * 0.4})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(canvas.width / 2 - 120 - lineW, bannerY + 42);
+        ctx.lineTo(canvas.width / 2 - 120, bannerY + 42);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(canvas.width / 2 + 120, bannerY + 42);
+        ctx.lineTo(canvas.width / 2 + 120 + lineW, bannerY + 42);
+        ctx.stroke();
       }
       ctx.restore();
 
@@ -3831,37 +4150,6 @@
       }
       ctx.restore();
 
-      // === POWER BAR (Bottom Left) ===
-      ctx.save();
-      ctx.textAlign = 'left';
-      const powerWidth = 100;
-      const powerHeight = 8;
-      const powerX = 20;
-      const powerY = canvas.height - 30;
-
-      // Power bar background
-      ctx.fillStyle = '#1a1a2e';
-      ctx.fillRect(powerX, powerY, powerWidth, powerHeight);
-
-      // Power bar fill
-      const powerPercent = player.power / player.maxPower;
-      const powerGradient = ctx.createLinearGradient(powerX, 0, powerX + powerWidth, 0);
-      powerGradient.addColorStop(0, '#ff0066');
-      powerGradient.addColorStop(1, '#ff00ff');
-      ctx.fillStyle = powerGradient;
-      ctx.fillRect(powerX, powerY, powerWidth * powerPercent, powerHeight);
-
-      // Power bar border
-      ctx.strokeStyle = '#ff0066';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(powerX, powerY, powerWidth, powerHeight);
-
-      // Power label
-      ctx.fillStyle = '#ff0066';
-      ctx.font = '10px "Courier New", monospace';
-      ctx.fillText(`PWR ${player.power}/${player.maxPower}`, powerX, powerY - 5);
-      ctx.restore();
-
       // === GRAZE / COMBO (Center Low - Subtle) ===
       if (graze > 0) {
         ctx.save();
@@ -3880,29 +4168,29 @@
       // Bomb cooldown indicator (moved left side, below other UI)
       const bombY = statusY;
       ctx.fillStyle = '#333';
-      ctx.fillRect(10, bombY, 80, 10);
+      ctx.fillRect(20, bombY, 80, 10);
       ctx.strokeStyle = player.bombReady ? '#00ffff' : '#666';
       ctx.lineWidth = 1;
-      ctx.strokeRect(10, bombY, 80, 10);
+      ctx.strokeRect(20, bombY, 80, 10);
       if (player.bombReady) {
         ctx.fillStyle = '#00ffff';
-        ctx.fillRect(12, bombY + 2, 76, 6);
+        ctx.fillRect(22, bombY + 2, 76, 6);
         ctx.fillStyle = '#000';
         ctx.font = 'bold 9px monospace';
-        ctx.fillText('BOMB', 15, bombY + 8);
+        ctx.fillText('BOMB', 25, bombY + 8);
       } else {
         ctx.fillStyle = '#00aaff';
-        ctx.fillRect(12, bombY + 2, 76 * (1 - player.bombCooldown / BOMB_COOLDOWN), 6);
+        ctx.fillRect(22, bombY + 2, 76 * (1 - player.bombCooldown / BOMB_COOLDOWN), 6);
         ctx.fillStyle = '#888';
         ctx.font = '10px monospace';
-        ctx.fillText(`${Math.ceil(player.bombCooldown)}s`, 35, bombY + 8);
+        ctx.fillText(`${Math.ceil(player.bombCooldown)}s`, 45, bombY + 8);
       }
 
       // Controls help (compact, bottom left corner)
       ctx.fillStyle = '#444';
       ctx.font = '9px monospace';
-      ctx.fillText('WASD/↑←↓→ 移动', 10, bombY + 22);
-      ctx.fillText('SPACE/SHIFT 炸弹', 10, bombY + 34);
+      ctx.fillText('WASD/↑←↓→ 移动', 20, bombY + 22);
+      ctx.fillText('SPACE/SHIFT 炸弹', 20, bombY + 34);
 
       // === BOSS HEALTH BAR (Top Right) ===
       if (boss.active) {
@@ -4022,7 +4310,7 @@
       ctx.save();
       ctx.fillStyle = '#8888aa';
       ctx.font = '14px "Courier New", monospace';
-      ctx.fillText(`WAVE ${waveCount}`, 10, canvas.height - 12);
+      ctx.fillText(`WAVE ${waveCount}`, 20, canvas.height - 12);
 
       // Pause indicator
       if (gameState === STATE.PAUSED) {
@@ -4331,6 +4619,136 @@
         ctx.beginPath();
         ctx.arc(s.x, s.y, s.size * s.life * 2, 0, Math.PI * 2);
         ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // ============ UPGRADE PARTICLES ============
+    function spawnUpgradeParticles(x, y) {
+      const colors = ['#00ffff', '#ffffff', '#88ffff', '#00ffaa', '#ffff00'];
+      // Ring burst
+      for (let i = 0; i < 24; i++) {
+        const angle = (i / 24) * Math.PI * 2;
+        const speed = 120 + gameRandom() * 180;
+        upgradeParticles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 0.6 + gameRandom() * 0.4,
+          maxLife: 1,
+          color: colors[Math.floor(gameRandom() * colors.length)],
+          size: 2 + gameRandom() * 3,
+          type: 'ring'
+        });
+      }
+      // Rising sparkles
+      for (let i = 0; i < 15; i++) {
+        const angle = -Math.PI / 2 + (gameRandom() - 0.5) * Math.PI * 0.8;
+        const speed = 80 + gameRandom() * 120;
+        upgradeParticles.push({
+          x: x + (gameRandom() - 0.5) * 40,
+          y: y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 0.8 + gameRandom() * 0.5,
+          maxLife: 1.3,
+          color: '#00ffff',
+          size: 1.5 + gameRandom() * 2,
+          type: 'rise'
+        });
+      }
+    }
+
+    function updateUpgradeParticles(dt) {
+      for (let i = upgradeParticles.length - 1; i >= 0; i--) {
+        const p = upgradeParticles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+        if (p.type === 'ring') {
+          p.vx *= 0.96;
+          p.vy *= 0.96;
+        }
+        if (p.life <= 0) upgradeParticles.splice(i, 1);
+      }
+    }
+
+    function renderUpgradeParticles() {
+      for (const p of upgradeParticles) {
+        const alpha = Math.min(1, p.life / (p.maxLife * 0.3));
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = p.color;
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (p.life / p.maxLife), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    // ============ ICE PENTAGRAM ============
+    function updateIceExplosions(dt) {
+      for (let i = iceExplosions.length - 1; i >= 0; i--) {
+        const e = iceExplosions[i];
+        e.life -= dt;
+        e.rotation += dt * 3;
+        if (e.life <= 0) iceExplosions.splice(i, 1);
+      }
+    }
+
+    function renderIceExplosions() {
+      for (const e of iceExplosions) {
+        const alpha = e.life / e.maxLife;
+        const r = e.radius * (1 + (1 - alpha) * 0.5);
+        ctx.save();
+        ctx.translate(e.x, e.y);
+        ctx.rotate(e.rotation);
+        ctx.globalAlpha = alpha;
+        // Outer pentagram
+        ctx.strokeStyle = '#00ddff';
+        ctx.lineWidth = 3;
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#00ddff';
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const outerAng = (i / 5) * Math.PI * 2 - Math.PI / 2;
+          const innerAng = ((i + 0.5) / 5) * Math.PI * 2 - Math.PI / 2;
+          const ox = Math.cos(outerAng) * r;
+          const oy = Math.sin(outerAng) * r;
+          const ix = Math.cos(innerAng) * r * 0.4;
+          const iy = Math.sin(innerAng) * r * 0.4;
+          if (i === 0) ctx.moveTo(ox, oy);
+          else ctx.lineTo(ox, oy);
+          ctx.lineTo(ix, iy);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        // Inner circle
+        ctx.strokeStyle = `rgba(0,221,255,${alpha * 0.5})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.3, 0, Math.PI * 2);
+        ctx.stroke();
+        // Rotating inner star (counter-rotate)
+        ctx.rotate(-e.rotation * 2);
+        ctx.strokeStyle = `rgba(255,255,255,${alpha * 0.4})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const outerAng = (i / 5) * Math.PI * 2 - Math.PI / 2;
+          const innerAng = ((i + 0.5) / 5) * Math.PI * 2 - Math.PI / 2;
+          const ox = Math.cos(outerAng) * r * 0.6;
+          const oy = Math.sin(outerAng) * r * 0.6;
+          const ix = Math.cos(innerAng) * r * 0.25;
+          const iy = Math.sin(innerAng) * r * 0.25;
+          if (i === 0) ctx.moveTo(ox, oy);
+          else ctx.lineTo(ox, oy);
+          ctx.lineTo(ix, iy);
+        }
+        ctx.closePath();
+        ctx.stroke();
         ctx.restore();
       }
     }
@@ -4721,7 +5139,210 @@
       }
     }
 
+    // ============ MENU AI BATTLE DEMO ============
+    const menuAI = {
+      player: { x: 512, y: 650, targetX: 512, shootTimer: 0, color: '#00ffff' },
+      boss: { x: 512, y: 180, targetX: 512, shootTimer: 0, angle: 0, color: '#ff00ff' },
+      bullets: [],
+      particles: [],
+      time: 0
+    };
+
+    function updateMenuAI(dt) {
+      const ai = menuAI;
+      ai.time += dt;
+      const p = ai.player;
+      const b = ai.boss;
+
+      // Boss movement - gentle sine wave
+      b.targetX = 512 + Math.sin(ai.time * 0.7) * 200;
+      b.x += (b.targetX - b.x) * 3 * dt;
+      b.angle += dt * 2;
+
+      // Player movement - follows boss with lag
+      p.targetX = b.x + Math.sin(ai.time * 1.3) * 80;
+      p.x += (p.targetX - p.x) * 2 * dt;
+
+      // Boss shoots spiral pattern
+      b.shootTimer -= dt;
+      if (b.shootTimer <= 0) {
+        b.shootTimer = 0.15;
+        const ang = b.angle;
+        for (let i = 0; i < 3; i++) {
+          const a = ang + (i / 3) * Math.PI * 2;
+          ai.bullets.push({
+            x: b.x, y: b.y + 20,
+            vx: Math.cos(a) * 100,
+            vy: Math.sin(a) * 80 + 40,
+            r: 4, color: '#ff00ff', alpha: 1, life: 4, type: 'boss'
+          });
+        }
+      }
+
+      // Player shoots upward
+      p.shootTimer -= dt;
+      if (p.shootTimer <= 0) {
+        p.shootTimer = 0.2;
+        const spread = Math.sin(ai.time * 2) * 15;
+        for (let i = -1; i <= 1; i++) {
+          ai.bullets.push({
+            x: p.x + i * 15, y: p.y - 20,
+            vx: i * 30 + spread, vy: -400,
+            r: 4, color: '#00ffff', alpha: 1, life: 3, type: 'player'
+          });
+        }
+      }
+
+      // Update bullets
+      for (let i = ai.bullets.length - 1; i >= 0; i--) {
+        const bul = ai.bullets[i];
+        bul.x += bul.vx * dt;
+        bul.y += bul.vy * dt;
+        bul.life -= dt;
+        bul.alpha = Math.min(1, bul.life);
+        // Remove off-screen or expired
+        if (bul.life <= 0 || bul.x < -50 || bul.x > 1074 || bul.y < -50 || bul.y > 820) {
+          ai.bullets.splice(i, 1);
+          continue;
+        }
+        // Player bullets hit boss
+        if (bul.type === 'player') {
+          const dx = bul.x - b.x, dy = bul.y - b.y;
+          if (Math.sqrt(dx*dx + dy*dy) < 35) {
+            ai.bullets.splice(i, 1);
+            for (let j = 0; j < 5; j++) {
+              ai.particles.push({
+                x: bul.x, y: bul.y,
+                vx: (Math.random() - 0.5) * 200,
+                vy: (Math.random() - 0.5) * 200,
+                life: 0.3 + Math.random() * 0.3,
+                color: '#ff88ff', size: 2 + Math.random() * 3
+              });
+            }
+          }
+        }
+        // Boss bullets graze player
+        if (bul.type === 'boss') {
+          const dx = bul.x - p.x, dy = bul.y - p.y;
+          if (Math.sqrt(dx*dx + dy*dy) < 20) {
+            ai.bullets.splice(i, 1);
+            for (let j = 0; j < 3; j++) {
+              ai.particles.push({
+                x: bul.x, y: bul.y,
+                vx: (Math.random() - 0.5) * 150,
+                vy: (Math.random() - 0.5) * 150,
+                life: 0.2 + Math.random() * 0.2,
+                color: '#00ffff', size: 2 + Math.random() * 2
+              });
+            }
+          }
+        }
+      }
+
+      // Update particles
+      for (let i = ai.particles.length - 1; i >= 0; i--) {
+        const pt = ai.particles[i];
+        pt.x += pt.vx * dt;
+        pt.y += pt.vy * dt;
+        pt.life -= dt;
+        if (pt.life <= 0) ai.particles.splice(i, 1);
+      }
+
+      // Cap arrays
+      if (ai.bullets.length > 300) ai.bullets.splice(0, ai.bullets.length - 300);
+      if (ai.particles.length > 200) ai.particles.splice(0, ai.particles.length - 200);
+    }
+
+    function renderMenuAI() {
+      const ai = menuAI;
+      const p = ai.player;
+      const b = ai.boss;
+      const time = ai.time;
+
+      // Ambient floating stars
+      for (let i = 0; i < 20; i++) {
+        const sx = (i * 137.5 + time * 10) % canvas.width;
+        const sy = (i * 97.3 + time * 5 + Math.sin(time + i) * 30) % canvas.height;
+        const brightness = 0.2 + Math.sin(time * 2 + i * 0.7) * 0.15;
+        ctx.fillStyle = `rgba(100, 150, 255, ${brightness})`;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Boss - simplified rotating shape
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(b.angle * 0.5);
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = b.color;
+      ctx.fillStyle = b.color + '88';
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const ang = (i / 6) * Math.PI * 2;
+        const r = 25 + Math.sin(time * 3 + i) * 8;
+        ctx.lineTo(Math.cos(ang) * r, Math.sin(ang) * r);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Core
+      ctx.fillStyle = '#fff';
+      ctx.shadowBlur = 15;
+      ctx.beginPath();
+      ctx.arc(0, 0, 6 + Math.sin(time * 5) * 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Player - simple triangle ship
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.shadowBlur = 15;
+      ctx.shadowColor = p.color;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.moveTo(0, -15);
+      ctx.lineTo(-10, 10);
+      ctx.lineTo(10, 10);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(0, 0, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Bullets
+      for (const bul of ai.bullets) {
+        ctx.save();
+        ctx.globalAlpha = bul.alpha * 0.7;
+        ctx.fillStyle = bul.color;
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = bul.color;
+        ctx.beginPath();
+        ctx.arc(bul.x, bul.y, bul.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Particles
+      for (const pt of ai.particles) {
+        ctx.save();
+        ctx.globalAlpha = pt.life * 2;
+        ctx.fillStyle = pt.color;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, pt.size * pt.life * 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
     function updateMenu(dt) {
+      // AI battle demo in background
+      updateMenuAI(dt);
+
       // Title phase: press any key to continue
       if (menuPhase === 'title') {
         if (Object.values(keys).some(v => v === true)) {
@@ -5000,39 +5621,87 @@
         return;
       }
 
+      // AI battle demo background
+      renderMenuAI();
+
+      // Dark overlay to make title readable
+      ctx.fillStyle = 'rgba(10, 10, 26, 0.75)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
       // Animated title with pulsing glow
       const time = Date.now() / 1000;
-      const pulseScale = 1 + Math.sin(time * 2) * 0.05;
+      const pulseScale = 1 + Math.sin(time * 2) * 0.04;
+      const glowPulse = 30 + Math.sin(time * 3) * 15;
 
       ctx.save();
-      ctx.translate(canvas.width/2, canvas.height/2 - 40);
+      ctx.translate(canvas.width/2, canvas.height/2 - 60);
       ctx.scale(pulseScale, pulseScale);
-      ctx.shadowBlur = 20 + Math.sin(time * 3) * 10;
+      ctx.shadowBlur = glowPulse;
       ctx.shadowColor = '#00ffff';
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = '#ffffff';
       ctx.textAlign = 'center';
-      ctx.font = '30px monospace';
+      ctx.font = 'bold 42px "Courier New", monospace';
       ctx.fillText('BULLET HELL', 0, 0);
+      // Subtle text outline
+      ctx.strokeStyle = '#00ffff';
+      ctx.lineWidth = 1;
+      ctx.strokeText('BULLET HELL', 0, 0);
       ctx.restore();
 
+      ctx.save();
+      ctx.shadowBlur = 15;
+      ctx.shadowColor = '#ff00ff';
       ctx.fillStyle = '#ff00ff';
       ctx.textAlign = 'center';
-      ctx.font = '16px monospace';
-      ctx.fillText('BOSS RUSH', canvas.width/2, canvas.height/2 - 10);
+      ctx.font = 'bold 22px "Courier New", monospace';
+      ctx.fillText('BOSS RUSH', canvas.width/2, canvas.height/2 - 20);
+      ctx.restore();
 
       // Title phase: only show "PRESS ANY KEY"
       if (menuPhase === 'title') {
+        ctx.textAlign = 'center';
         if (Math.floor(time * 2) % 2 === 0) {
           ctx.fillStyle = '#00ffff';
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = '#00ffff';
           ctx.font = '16px monospace';
-          ctx.fillText('PRESS ANY KEY', canvas.width/2, canvas.height/2 + 50);
+          ctx.fillText('PRESS ANY KEY', canvas.width/2, canvas.height/2 + 30);
         }
+
+        // Decorative elements on title screen
+        // Version tag
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#444';
+        ctx.font = '11px monospace';
+        ctx.fillText('v1.0  |  10 WEAPONS  |  ENDLESS BOSS RUSH', canvas.width/2, canvas.height - 60);
+
+        // Bottom controls hint
+        ctx.fillStyle = '#333';
+        ctx.font = '10px monospace';
+        ctx.fillText('WASD: MOVE    SPACE: BOMB    L: DEBUG KILL', canvas.width/2, canvas.height - 35);
+
+        // Side decorations - vertical lines
+        ctx.strokeStyle = `rgba(0, 255, 255, ${0.1 + Math.sin(time * 1.5) * 0.05})`;
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 3; i++) {
+          const lx = 60 + i * 20;
+          ctx.beginPath();
+          ctx.moveTo(lx, 100 + Math.sin(time + i) * 20);
+          ctx.lineTo(lx, canvas.height - 100 + Math.cos(time + i) * 20);
+          ctx.stroke();
+          const rx = canvas.width - 60 - i * 20;
+          ctx.beginPath();
+          ctx.moveTo(rx, 100 + Math.cos(time + i) * 20);
+          ctx.lineTo(rx, canvas.height - 100 + Math.sin(time + i) * 20);
+          ctx.stroke();
+        }
+
         ctx.textAlign = 'left';
         return;
       }
 
       // Select phase: show menu options with indicator
-      const menuStartY = canvas.height/2 + 30;
+      const menuStartY = canvas.height/2 + 60;
       ctx.font = '14px "Courier New", monospace';
       ctx.textAlign = 'center';
       for (let i = 0; i < menuOptions.length; i++) {
@@ -5389,6 +6058,34 @@
     function update(dt) {
       gameTime += dt;
       bgPulse += dt * 2;
+
+      // L key: instant kill boss (testing)
+      if ((isDown('l') || isDown('L')) && !keys['L_kill_pressed']) {
+        keys['L_kill_pressed'] = true;
+        if (boss.active && !boss.dead) {
+          boss.hp = 0;
+          boss.displayHp = 0;
+          boss.dead = true;
+          killCount++;
+          if (killCount >= KILLS_PER_WEAPON) {
+            killCount = 0;
+            currentWeapon = (currentWeapon + 1) % WEAPON_COUNT;
+            weaponSwitchTimer = WEAPON_SWITCH_DISPLAY_TIME;
+            lastWeaponFire = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            spawnUpgradeParticles(player.x, player.y);
+          }
+          spawnExplosion(boss.x, boss.y, boss.color, 50);
+          triggerScreenShake(6, 0.15);
+          triggerScreenFlash(0.8, boss.color);
+          const dropCount = Math.min(1 + Math.floor(waveCount / 3), 6);
+          for (let i = 0; i < dropCount; i++) spawnPowerup(boss.x, boss.y);
+          score += 1000;
+          waveCount++;
+          bossIndex++;
+          startBoss();
+        }
+      }
+      if (!isDown('l') && !isDown('L')) keys['L_kill_pressed'] = false;
       updateScreenShake(dt);
       updateScreenFlash(dt);
       updateBombSlash(dt);
@@ -5404,6 +6101,8 @@
       updateMeteors(dt);
       updateParticles(dt);
       updateSparkles(dt);
+      updateUpgradeParticles(dt);
+      updateIceExplosions(dt);
       updateBulletTrails(dt);
       updateExplosionParticles(dt);
       updateDisplayHp(dt);
@@ -5426,11 +6125,14 @@
       }
 
       ctx.fillStyle = '#0a0a1a';
-      ctx.fillRect(-10, -10, canvas.width + 20, canvas.height + 20);
+      const diag = Math.ceil(Math.sqrt(canvas.width * canvas.width + canvas.height * canvas.height)) + 20;
+      ctx.fillRect(-diag / 2 + canvas.width / 2, -diag / 2 + canvas.height / 2, diag, diag);
       renderBackground();
       renderMeteors();
       renderBulletTrails();
       renderSparkles();
+      renderUpgradeParticles();
+      renderIceExplosions();
 
       switch(gameState) {
         case STATE.MENU:
@@ -5466,6 +6168,8 @@
           renderMeteors();
           renderBulletTrails();
           renderSparkles();
+          renderUpgradeParticles();
+          renderIceExplosions();
           renderParticles();
           renderBullets();
           if (boss.active) renderBoss();
