@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"C:\\\\Program Files\\\\Git\\\\bin\\\\git.exe\" --version 2>$null)",
+      "PowerShell(& \"C:\\\\Program Files \\(x86\\)\\\\Git\\\\bin\\\\git.exe\" --version 2>$null)",
+      "PowerShell(powershell -ExecutionPolicy Bypass -File \"D:\\\\Code\\\\bullet-hell-game\\\\scan_tools.ps1\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "PowerShell(& \"C:\\\\Program Files\\\\Git\\\\bin\\\\git.exe\" status)"
+    ]
+  }
+}
