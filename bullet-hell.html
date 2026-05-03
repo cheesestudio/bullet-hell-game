@@ -6228,11 +6228,10 @@
       ctx.font = '16px monospace';
       ctx.fillText(`REACHED WAVE ${waveCount}`, canvas.width/2, canvas.height/2 - 10);
 
-      // Score count-up animation effect
-      const displayScore = Math.min(score, Math.floor(time * 50) % (score + 100));
+      // Score display (final value, no animation)
       ctx.fillStyle = '#fff';
       ctx.font = '20px monospace';
-      ctx.fillText(`SCORE: ${displayScore}`, canvas.width/2, canvas.height/2 + 20);
+      ctx.fillText(`SCORE: ${score}`, canvas.width/2, canvas.height/2 + 20);
 
       if (score > highScore) {
         localStorage.setItem('bulletHellHigh', score);
