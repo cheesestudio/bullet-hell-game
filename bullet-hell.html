@@ -123,7 +123,7 @@
     // ==================== Weapon System ====================
     const WEAPON_COUNT = 10;
     const KILLS_PER_WEAPON = 3;
-    let currentWeapon = 1; // Start with Homing Rocket (single-shot)
+    let currentWeapon = 0; // Start with Spread Shot (single-shot at power 0)
     let killCount = 0;
     let weaponSwitchTimer = 0;
     const WEAPON_SWITCH_DISPLAY_TIME = 1.5;
@@ -1383,103 +1383,313 @@
       for (const b of bullets) {
         ctx.save();
 
-        // Weapon-specific rendering
+        // ====== HOMING ROCKET - fiery trail + nose glow ======
         if (b.type === 'homing' && b.trail) {
-          // Trail for homing rockets
           for (let j = 0; j < b.trail.length; j++) {
             const t = b.trail[j];
             if (t.alpha <= 0) continue;
-            ctx.fillStyle = `rgba(255,50,30,${t.alpha * 0.5})`;
+            const s = 1 + j / b.trail.length;
+            ctx.fillStyle = `rgba(255,80,20,${t.alpha * 0.6})`;
+            ctx.shadowBlur = 6;
+            ctx.shadowColor = '#ff4400';
             ctx.beginPath();
-            ctx.arc(t.x, t.y, 3 * (j / b.trail.length), 0, Math.PI * 2);
+            ctx.arc(t.x, t.y, 2 * s, 0, Math.PI * 2);
             ctx.fill();
           }
+          // Rocket body
+          const ang = Math.atan2(b.vy, b.vx);
+          ctx.translate(b.x, b.y);
+          ctx.rotate(ang + Math.PI / 2);
+          ctx.fillStyle = '#cc3333';
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = '#ff4400';
+          ctx.beginPath();
+          ctx.moveTo(0, -b.r * 1.5);
+          ctx.lineTo(-b.r * 0.6, b.r);
+          ctx.lineTo(0, b.r * 0.6);
+          ctx.lineTo(b.r * 0.6, b.r);
+          ctx.closePath();
+          ctx.fill();
+          // Inner flame
+          ctx.fillStyle = '#ffcc00';
+          ctx.beginPath();
+          ctx.arc(0, b.r * 0.3, b.r * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          continue;
         }
 
-        if (b.type === 'lightning' && b.bolts) {
-          // Lightning bolts
+        // ====== BOOMERANG - spinning golden blade ======
+        if (b.type === 'boomerang') {
+          const spin = Date.now() / 50;
+          ctx.translate(b.x, b.y);
+          ctx.rotate(spin);
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = '#ffdd00';
+          // Blade shape
+          ctx.fillStyle = '#ffdd00';
+          ctx.beginPath();
+          ctx.moveTo(0, -b.r);
+          ctx.lineTo(-b.r * 0.4, 0);
+          ctx.lineTo(0, b.r);
+          ctx.lineTo(b.r * 0.4, 0);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = '#fff8cc';
+          ctx.beginPath();
+          ctx.arc(0, 0, b.r * 0.25, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          continue;
+        }
+
+        // ====== ENERGY PULSE - expanding ring with particles ======
+        if (b.type === 'pulse') {
+          ctx.globalAlpha = b.alpha * 0.6;
+          ctx.strokeStyle = '#00ff88';
+          ctx.lineWidth = 3;
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = '#00ff88';
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // Inner ring
+          ctx.globalAlpha = b.alpha * 0.3;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius * 0.7, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+          continue;
+        }
+
+        // ====== LIGHTNING RING - crackling bolts ======
+        if (b.type === 'lightning') {
+          // Expanding ring
+          ctx.globalAlpha = b.alpha * 0.5;
           ctx.strokeStyle = '#ffffff';
           ctx.lineWidth = 2;
-          for (const bolt of b.bolts) {
-            ctx.beginPath();
-            ctx.moveTo(b.x, b.y);
-            ctx.lineTo(bolt.x, bolt.y);
-            ctx.stroke();
+          ctx.shadowBlur = 25;
+          ctx.shadowColor = '#88ccff';
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // Inner glow ring
+          ctx.globalAlpha = b.alpha * 0.2;
+          ctx.strokeStyle = '#aaddff';
+          ctx.lineWidth = 4;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius * 0.6, 0, Math.PI * 2);
+          ctx.stroke();
+          // Lightning bolts from center
+          if (b.bolts) {
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2;
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = '#ffffff';
+            for (const bolt of b.bolts) {
+              const ba = bolt.life / 0.1;
+              ctx.globalAlpha = ba;
+              ctx.beginPath();
+              ctx.moveTo(b.x, b.y);
+              // Jagged lightning path
+              const mx = (b.x + bolt.x) / 2 + (Math.random() - 0.5) * 20;
+              const my = (b.y + bolt.y) / 2 + (Math.random() - 0.5) * 20;
+              ctx.lineTo(mx, my);
+              ctx.lineTo(bolt.x, bolt.y);
+              ctx.stroke();
+            }
           }
+          ctx.restore();
+          continue;
         }
 
+        // ====== WAVE CANNON - layered shockwave ======
+        if (b.type === 'wave') {
+          ctx.globalAlpha = b.alpha * 0.7;
+          ctx.strokeStyle = '#ff00ff';
+          ctx.lineWidth = 4;
+          ctx.shadowBlur = 30;
+          ctx.shadowColor = '#ff00ff';
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.stroke();
+          // Secondary thin ring
+          ctx.globalAlpha = b.alpha * 0.3;
+          ctx.strokeStyle = '#cc66ff';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius * 0.85, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+          continue;
+        }
+
+        // ====== ICE SPIKE - crystal shard with frost ======
+        if (b.type === 'ice') {
+          const ang = Math.atan2(b.vy, b.vx);
+          ctx.translate(b.x, b.y);
+          ctx.rotate(ang + Math.PI / 2);
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = '#00ddff';
+          // Crystal body
+          ctx.fillStyle = b.color;
+          ctx.beginPath();
+          ctx.moveTo(0, -b.r * 1.8);
+          ctx.lineTo(-b.r * 0.7, -b.r * 0.3);
+          ctx.lineTo(-b.r * 0.5, b.r);
+          ctx.lineTo(b.r * 0.5, b.r);
+          ctx.lineTo(b.r * 0.7, -b.r * 0.3);
+          ctx.closePath();
+          ctx.fill();
+          // White core
+          ctx.fillStyle = 'rgba(255,255,255,0.7)';
+          ctx.beginPath();
+          ctx.moveTo(0, -b.r * 1.2);
+          ctx.lineTo(-b.r * 0.25, 0);
+          ctx.lineTo(0, b.r * 0.5);
+          ctx.lineTo(b.r * 0.25, 0);
+          ctx.closePath();
+          ctx.fill();
+          // Frost particles when frozen
+          if (b.frozen) {
+            ctx.strokeStyle = '#aaf0ff';
+            ctx.lineWidth = 2;
+            for (let k = 0; k < 6; k++) {
+              const fa = k * Math.PI / 3;
+              ctx.beginPath();
+              ctx.moveTo(Math.cos(fa) * b.r, Math.sin(fa) * b.r);
+              ctx.lineTo(Math.cos(fa) * (b.r + 12), Math.sin(fa) * (b.r + 12));
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+          continue;
+        }
+
+        // ====== BLACK HOLE - swirling vortex ======
+        if (b.type === 'blackhole') {
+          const t = Date.now() / 200;
+          ctx.translate(b.x, b.y);
+          // Outer glow
+          ctx.globalAlpha = (b.alpha || 1) * 0.3;
+          ctx.shadowBlur = 30;
+          ctx.shadowColor = '#6600ff';
+          ctx.fillStyle = '#4400aa';
+          ctx.beginPath();
+          ctx.arc(0, 0, b.radius * 1.5, 0, Math.PI * 2);
+          ctx.fill();
+          // Swirl rings
+          for (let k = 0; k < 3; k++) {
+            ctx.rotate(t + k * 2.1);
+            ctx.globalAlpha = (b.alpha || 1) * (0.4 - k * 0.1);
+            ctx.strokeStyle = `hsl(${270 + k * 20},100%,${50 + k * 10}%)`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(0, 0, b.radius * (0.6 + k * 0.3), 0, Math.PI * 1.5);
+            ctx.stroke();
+          }
+          // Core
+          ctx.globalAlpha = b.alpha || 1;
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = '#9933ff';
+          ctx.fillStyle = '#6600ff';
+          ctx.beginPath();
+          ctx.arc(0, 0, b.radius * 0.4, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#aa44ff';
+          ctx.beginPath();
+          ctx.arc(0, 0, b.radius * 0.15, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          continue;
+        }
+
+        // ====== TIME PENDULUM - golden swinging orb ======
         if (b.type === 'pendulum') {
-          // Pendulum trail
-          ctx.fillStyle = `rgba(255,221,0,0.3)`;
+          // Glow aura
+          ctx.shadowBlur = 15;
+          ctx.shadowColor = '#ffdd00';
+          ctx.fillStyle = `rgba(255,221,0,0.25)`;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.r * 2, 0, Math.PI * 2);
+          ctx.fill();
+          // Orb
+          const grad = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+          grad.addColorStop(0, '#ffffff');
+          grad.addColorStop(0.4, '#ffdd00');
+          grad.addColorStop(1, '#cc8800');
+          ctx.fillStyle = grad;
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
           ctx.fill();
-        }
-
-        if (b.type === 'ice' && b.frozen) {
-          ctx.strokeStyle = '#00ddff';
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.arc(b.x, b.y, b.r + 10, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-
-        if (b.type === 'blackhole') {
-          // Black hole glow
-          ctx.shadowBlur = 20;
-          ctx.shadowColor = '#6600ff';
-          ctx.fillStyle = '#6600ff';
-          ctx.globalAlpha = b.alpha || 1;
-          ctx.beginPath();
-          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-          ctx.fill();
+          // Trail dots
+          ctx.fillStyle = `rgba(255,221,0,0.4)`;
+          for (let k = 1; k <= 3; k++) {
+            ctx.beginPath();
+            ctx.arc(b.x - b.vx * 0.005 * k, b.y - b.vy * 0.005 * k, b.r * (1 - k * 0.2), 0, Math.PI * 2);
+            ctx.fill();
+          }
           ctx.restore();
           continue;
         }
 
-        if (b.type === 'pulse') {
-          ctx.fillStyle = `rgba(0,255,136,${b.alpha})`;
+        // ====== SPREAD SHOT - cyan energy bolts ======
+        if (b.type === 'spread') {
+          const ang = Math.atan2(b.vy, b.vx);
+          ctx.translate(b.x, b.y);
+          ctx.rotate(ang + Math.PI / 2);
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = b.color;
+          const grad = ctx.createLinearGradient(0, b.r * 2, 0, -b.r * 3);
+          grad.addColorStop(0, b.color + '00');
+          grad.addColorStop(0.4, b.color + '88');
+          grad.addColorStop(1, b.color);
+          ctx.fillStyle = grad;
           ctx.beginPath();
-          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-          continue;
-        }
-
-        if (b.type === 'wave') {
-          ctx.strokeStyle = `rgba(255,0,255,${b.alpha})`;
-          ctx.lineWidth = 4;
-          ctx.beginPath();
-          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.restore();
-          continue;
-        }
-
-        if (b.owner === 'player') {
-          // Player bullets - glowing elongated shape with trail
-          const gradient = ctx.createLinearGradient(b.x, b.y + b.r * 2, b.x, b.y - b.r * 3);
-          gradient.addColorStop(0, b.color + '00');
-          gradient.addColorStop(0.5, b.color + '88');
-          gradient.addColorStop(1, b.color);
-          ctx.fillStyle = gradient;
-          ctx.beginPath();
-          ctx.moveTo(b.x - b.r * 0.6, b.y - b.r * 2);
-          ctx.lineTo(b.x + b.r * 0.6, b.y - b.r * 2);
-          ctx.lineTo(b.x + b.r, b.y + b.r);
-          ctx.lineTo(b.x - b.r, b.y + b.r);
+          ctx.moveTo(-b.r * 0.5, b.r);
+          ctx.lineTo(-b.r * 0.3, -b.r * 2);
+          ctx.lineTo(0, -b.r * 2.5);
+          ctx.lineTo(b.r * 0.3, -b.r * 2);
+          ctx.lineTo(b.r * 0.5, b.r);
           ctx.closePath();
           ctx.fill();
-
-          // Core
-          ctx.shadowBlur = 15;
-          ctx.shadowColor = b.color;
-          ctx.fillStyle = '#ffffff';
+          ctx.fillStyle = '#fff';
           ctx.beginPath();
-          ctx.arc(b.x, b.y, b.r * 0.4, 0, Math.PI * 2);
+          ctx.arc(0, -b.r * 0.5, b.r * 0.3, 0, Math.PI * 2);
           ctx.fill();
-        } else if (b.type !== 'blackhole' && b.type !== 'pulse' && b.type !== 'wave') {
-          // Enemy bullets - glowing circle with inner pattern
+          ctx.restore();
+          continue;
+        }
+
+        // ====== SPIRAL SHOT - rainbow spinning ======
+        if (b.type === 'spiral') {
+          const spin = Date.now() / 80;
+          ctx.translate(b.x, b.y);
+          ctx.rotate(spin);
+          ctx.shadowBlur = 8;
+          ctx.shadowColor = b.color;
+          ctx.fillStyle = b.color;
+          ctx.beginPath();
+          for (let k = 0; k < 5; k++) {
+            const a = (k / 5) * Math.PI * 2;
+            const r = b.r * (k % 2 === 0 ? 1.2 : 0.5);
+            if (k === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+            else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.beginPath();
+          ctx.arc(0, 0, b.r * 0.3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+          continue;
+        }
+
+        // ====== ENEMY BULLETS ======
+        if (b.owner !== 'player') {
           const gradient = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r * 1.5);
           gradient.addColorStop(0, '#ffffff');
           gradient.addColorStop(0.3, b.color);
@@ -1490,8 +1700,6 @@
           ctx.beginPath();
           ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
           ctx.fill();
-
-          // Inner ring
           ctx.strokeStyle = '#ffffff';
           ctx.lineWidth = 1;
           ctx.globalAlpha = 0.6;
@@ -2174,49 +2382,68 @@
     // ============ WEAPON SYSTEM ============
     function fireSpreadShot(p) {
       const baseSpeed = -400 - p.power * 30;
-      const angles = p.power >= 2 ? [-30, -15, 0, 15, 30] : [-15, 0, 15];
+      // power 0: single, 1: double, 2: triple, 3+: five spread
+      let angles;
+      if (p.power >= 3) angles = [-30, -15, 0, 15, 30];
+      else if (p.power >= 2) angles = [-15, 0, 15];
+      else if (p.power >= 1) angles = [-8, 8];
+      else angles = [0];
+      const color = p.power >= 2 ? '#00ffff' : p.power >= 1 ? '#00ccff' : '#00aaff';
       for (const a of angles) {
         const rad = a * Math.PI / 180;
         bullets.push({
           x: p.x, y: p.y - 20,
           vx: Math.sin(rad) * baseSpeed * 0.3,
           vy: Math.cos(rad) * baseSpeed,
-          r: 5, owner: 'player', type: 'spread',
-          color: p.power >= 2 ? '#00ffff' : '#00aaff'
+          r: 5, owner: 'player', type: 'spread', color
         });
       }
     }
 
     function fireHomingRocket(p) {
-      let target = null;
-      if (boss.active) {
-        const dx = boss.x - p.x, dy = boss.y - p.y;
-        const d = Math.sqrt(dx*dx + dy*dy);
-        if (d > 0) target = {x: boss.x, y: boss.y, dist: d};
+      // power 0: 1 rocket, 1: 2 rockets, 2: 3 rockets, 3+: 5 rockets
+      const count = p.power >= 3 ? 5 : p.power >= 2 ? 3 : p.power >= 1 ? 2 : 1;
+      const spread = count > 1 ? 15 : 0;
+      for (let i = 0; i < count; i++) {
+        const offset = count === 1 ? 0 : (i - (count - 1) / 2) * spread;
+        const x = p.x + offset * 2;
+        const color = p.power >= 2 ? '#ff3333' : p.power >= 1 ? '#ff5555' : '#ff4444';
+        let vx = 0, vy = -250;
+        if (boss.active) {
+          const dx = boss.x - x, dy = boss.y - p.y;
+          const d = Math.sqrt(dx*dx + dy*dy);
+          if (d > 0) { vx = dx / d * 250; vy = dy / d * 250; }
+        }
+        bullets.push({
+          x: x, y: p.y - 20, vx, vy, r: 8,
+          owner: 'player', type: 'homing', color,
+          trail: []
+        });
       }
-      let vx = 0, vy = -250;
-      if (target) {
-        vx = (target.x - p.x) / target.dist * 250;
-        vy = (target.y - p.y) / target.dist * 250;
-      }
-      bullets.push({
-        x: p.x, y: p.y - 20, vx, vy, r: 8,
-        owner: 'player', type: 'homing', color: '#ff4444',
-        trail: []
-      });
     }
 
     function fireBoomerang(p) {
-      bullets.push({
-        x: p.x, y: p.y - 30, vx: -100, vy: -150, r: 10,
-        owner: 'player', type: 'boomerang', color: '#ffff00',
-        phase: 0, originX: p.x, originY: p.y,
-        time: 0, duration: 2.0
-      });
+      // power 0: 1, 1: 2 spread, 2: 3 spread, 3+: 5 spread
+      const count = p.power >= 3 ? 5 : p.power >= 2 ? 3 : p.power >= 1 ? 2 : 1;
+      const spread = count > 1 ? 30 : 0;
+      for (let i = 0; i < count; i++) {
+        const offset = count === 1 ? 0 : (i - (count - 1) / 2) * spread;
+        const ang = (-90 + offset) * Math.PI / 180;
+        const speed = 180;
+        const color = p.power >= 2 ? '#ffff00' : p.power >= 1 ? '#eedd00' : '#cccc00';
+        bullets.push({
+          x: p.x + offset * 3, y: p.y - 30,
+          vx: Math.sin(ang) * speed, vy: Math.cos(ang) * -speed,
+          r: 10, owner: 'player', type: 'boomerang', color,
+          phase: 0, originX: p.x + offset * 3, originY: p.y - 30,
+          time: 0, duration: 2.0
+        });
+      }
     }
 
     function fireEnergyPulse(p) {
-      const rings = p.power >= 2 ? 3 : 2;
+      // power 0: 1 ring, 1: 2 rings, 2: 3 rings, 3+: 4 rings
+      const rings = p.power >= 3 ? 4 : p.power >= 2 ? 3 : p.power >= 1 ? 2 : 1;
       for (let r = 0; r < rings; r++) {
         setTimeout(() => {
           bullets.push({
@@ -2231,8 +2458,9 @@
 
     let spiralAngle = 0;
     function fireSpiralShot(p) {
+      // power 0: 1 spiral, 1: 2 spirals, 2: 3 spirals, 3+: 4 spirals
+      const arms = p.power >= 3 ? 4 : p.power >= 2 ? 3 : p.power >= 1 ? 2 : 1;
       spiralAngle += 25 + p.power * 3;
-      const arms = p.power >= 2 ? 2 : 1;
       for (let a = 0; a < arms; a++) {
         const ang = spiralAngle + a * 360 / arms;
         const rad = ang * Math.PI / 180;
@@ -2241,21 +2469,28 @@
           vx: Math.sin(rad) * 80,
           vy: -350, r: 4,
           owner: 'player', type: 'spiral',
-          color: `hsl${((ang%360)+360)%360},100%,60%`
+          color: `hsl(${((ang%360)+360)%360},100%,60%)`
         });
       }
     }
 
     function fireLightningRing(p) {
-      bullets.push({
-        x: p.x, y: p.y, vx: 0, vy: 0, r: 15,
-        owner: 'player', type: 'lightning', color: '#ffffff',
-        radius: 20, maxRadius: 500, expanding: true,
-        alpha: 1, bolts: [], boltTimer: 0
-      });
+      // power 0: 1 ring, 1+: more rings with bigger radius
+      const count = p.power >= 3 ? 3 : p.power >= 2 ? 2 : 1;
+      for (let i = 0; i < count; i++) {
+        setTimeout(() => {
+          bullets.push({
+            x: p.x, y: p.y, vx: 0, vy: 0, r: 15,
+            owner: 'player', type: 'lightning', color: '#ffffff',
+            radius: 20, maxRadius: 400 + p.power * 50, expanding: true,
+            alpha: 1, bolts: [], boltTimer: 0
+          });
+        }, i * 150);
+      }
     }
 
     function fireWaveCannon(p) {
+      // power 0-1: single wave, 2+: wider wave with more impact
       p.charging = true;
       if (!p.chargeTimer) p.chargeTimer = 0;
       const prevTime = p.lastFireTime || gameTime;
@@ -2265,44 +2500,82 @@
         bullets.push({
           x: p.x, y: p.y, vx: 0, vy: 0, r: 20,
           owner: 'player', type: 'wave', color: '#ff00ff',
-          radius: 30, maxRadius: 600 + p.power * 60,
+          radius: 30, maxRadius: 500 + p.power * 80,
           expanding: true, alpha: 1
         });
+        // Extra waves at higher power
+        if (p.power >= 2) {
+          setTimeout(() => {
+            bullets.push({
+              x: p.x - 40, y: p.y, vx: 0, vy: 0, r: 15,
+              owner: 'player', type: 'wave', color: '#cc00ff',
+              radius: 20, maxRadius: 300 + p.power * 40, expanding: true, alpha: 0.7
+            });
+            bullets.push({
+              x: p.x + 40, y: p.y, vx: 0, vy: 0, r: 15,
+              owner: 'player', type: 'wave', color: '#cc00ff',
+              radius: 20, maxRadius: 300 + p.power * 40, expanding: true, alpha: 0.7
+            });
+          }, 200);
+        }
       }
       p.lastFireTime = gameTime;
     }
 
     function fireIceSpike(p) {
-      const ang = -Math.PI / 2;
-      bullets.push({
-        x: p.x, y: p.y - 20,
-        vx: Math.sin(ang) * 100,
-        vy: Math.cos(ang) * -450,
-        r: 6, owner: 'player',
-        type: 'ice', color: '#00ddff',
-        frozen: false
-      });
+      // power 0: 1 spike, 1: 2 spikes, 2: 3 spikes, 3+: 5 spikes
+      const count = p.power >= 3 ? 5 : p.power >= 2 ? 3 : p.power >= 1 ? 2 : 1;
+      const spread = count > 1 ? 12 : 0;
+      for (let i = 0; i < count; i++) {
+        const offset = count === 1 ? 0 : (i - (count - 1) / 2) * spread;
+        const ang = (-90 + offset) * Math.PI / 180;
+        const color = p.power >= 2 ? '#00eeff' : p.power >= 1 ? '#00ddff' : '#00bbee';
+        bullets.push({
+          x: p.x + offset * 2, y: p.y - 20,
+          vx: Math.sin(ang) * 100, vy: Math.cos(ang) * -450,
+          r: 6, owner: 'player', type: 'ice', color, frozen: false
+        });
+      }
     }
 
     function fireBlackHole(p) {
+      // power 0: small, 1: bigger, 2: bigger + 2nd mini hole, 3+: massive
+      const size = 20 + p.power * 10;
       bullets.push({
         x: p.x, y: p.y - 50, vx: 0, vy: 0, r: 15,
         owner: 'player', type: 'blackhole', color: '#6600ff',
-        radius: 20, maxRadius: 100, gravityRadius: 120,
+        radius: size, maxRadius: 80 + p.power * 20, gravityRadius: 100 + p.power * 20,
         active: true, time: 0, duration: 2.0 + p.power * 0.3,
-        exploding: false, explosionRadius: 150
+        exploding: false, explosionRadius: 130 + p.power * 20
       });
+      if (p.power >= 2) {
+        setTimeout(() => {
+          bullets.push({
+            x: p.x - 60, y: p.y - 30, vx: 0, vy: 0, r: 10,
+            owner: 'player', type: 'blackhole', color: '#5500cc',
+            radius: size * 0.6, maxRadius: 60, gravityRadius: 80,
+            active: true, time: 0, duration: 1.5,
+            exploding: false, explosionRadius: 100
+          });
+        }, 300);
+      }
     }
 
     let pendulumAngle = 0;
     function fireTimePendulum(p) {
+      // power 0: 1, 1: 2 pendulums, 2: 3, 3+: 5
+      const count = p.power >= 3 ? 5 : p.power >= 2 ? 3 : p.power >= 1 ? 2 : 1;
       const amp = 30 + p.power * 3;
-      bullets.push({
-        x: p.x, y: p.y - 20, vx: 0, vy: -300, r: 8,
-        owner: 'player', type: 'pendulum', color: '#ffdd00',
-        originY: p.y - 20, amplitude: amp,
-        pendulumAngle: pendulumAngle, time: 0, duration: 1.5
-      });
+      for (let i = 0; i < count; i++) {
+        const offset = count === 1 ? 0 : (i - (count - 1) / 2) * 25;
+        const color = p.power >= 2 ? '#ffee00' : p.power >= 1 ? '#ffdd00' : '#ddbb00';
+        bullets.push({
+          x: p.x + offset, y: p.y - 20, vx: 0, vy: -300, r: 8,
+          owner: 'player', type: 'pendulum', color,
+          originY: p.y - 20, amplitude: amp,
+          pendulumAngle: pendulumAngle + i * 30, time: 0, duration: 1.5
+        });
+      }
       pendulumAngle += 20;
     }
 
@@ -4721,7 +4994,175 @@
       }
     }
 
+    // ==================== Menu Demo Battle ====================
+    const demoShips = [];
+    const demoBullets = [];
+    const demoParticles = [];
+    let demoTimer = 0;
+
+    function initDemoBattle() {
+      demoShips.length = 0;
+      demoBullets.length = 0;
+      demoParticles.length = 0;
+      demoTimer = 0;
+      // Create 2 friendly ships
+      for (let i = 0; i < 2; i++) {
+        demoShips.push({
+          x: canvas.width * (0.3 + i * 0.4),
+          y: canvas.height - 60,
+          vx: 0, vy: 0,
+          color: i === 0 ? '#00ffff' : '#ff8800',
+          shootTimer: Math.random() * 0.5,
+          targetX: canvas.width * (0.3 + i * 0.4),
+          targetY: canvas.height - 60,
+          retargetTimer: 2 + Math.random() * 2
+        });
+      }
+    }
+
+    function updateDemoBattle(dt) {
+      // Lazy init on first call
+      if (demoShips.length === 0) initDemoBattle();
+
+      demoTimer += dt;
+
+      // Update demo ships
+      for (const ship of demoShips) {
+        ship.retargetTimer -= dt;
+        if (ship.retargetTimer <= 0) {
+          ship.targetX = 40 + Math.random() * (canvas.width - 80);
+          ship.targetY = canvas.height * 0.5 + Math.random() * (canvas.height * 0.4);
+          ship.retargetTimer = 1.5 + Math.random() * 2.5;
+        }
+        const dx = ship.targetX - ship.x, dy = ship.targetY - ship.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > 2) {
+          ship.vx = (dx / dist) * 120;
+          ship.vy = (dy / dist) * 120;
+        } else {
+          ship.vx *= 0.9; ship.vy *= 0.9;
+        }
+        ship.x += ship.vx * dt;
+        ship.y += ship.vy * dt;
+        ship.x = Math.max(15, Math.min(canvas.width - 15, ship.x));
+        ship.y = Math.max(canvas.height * 0.4, Math.min(canvas.height - 15, ship.y));
+
+        // Shoot
+        ship.shootTimer -= dt;
+        if (ship.shootTimer <= 0) {
+          ship.shootTimer = 0.15 + Math.random() * 0.2;
+          const aimX = 20 + Math.random() * (canvas.width - 40);
+          const aimY = -20;
+          const ang = Math.atan2(aimY - ship.y, aimX - ship.x);
+          demoBullets.push({
+            x: ship.x, y: ship.y - 12,
+            vx: Math.cos(ang) * 500,
+            vy: Math.sin(ang) * 500,
+            r: 3, color: ship.color,
+            life: 2.5
+          });
+        }
+      }
+
+      // Update demo bullets
+      for (let i = demoBullets.length - 1; i >= 0; i--) {
+        const b = demoBullets[i];
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+        b.life -= dt;
+        if (b.life <= 0 || b.x < -10 || b.x > canvas.width + 10 || b.y < -10 || b.y > canvas.height + 10) {
+          // Spawn a small particle on disappear
+          demoParticles.push({
+            x: b.x, y: b.y, vx: (Math.random() - 0.5) * 40, vy: (Math.random() - 0.5) * 40,
+            r: 2 + Math.random() * 2, color: b.color, life: 0.3 + Math.random() * 0.3, maxLife: 0.6
+          });
+          demoBullets.splice(i, 1);
+        }
+      }
+
+      // Cap bullets
+      while (demoBullets.length > 80) {
+        demoBullets.shift();
+      }
+
+      // Update demo particles
+      for (let i = demoParticles.length - 1; i >= 0; i--) {
+        const p = demoParticles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= dt;
+        if (p.life <= 0) demoParticles.splice(i, 1);
+      }
+      while (demoParticles.length > 120) {
+        demoParticles.shift();
+      }
+
+      // Occasional "hit" effects - spawn random explosion particles
+      if (Math.random() < dt * 1.5) {
+        const ex = 30 + Math.random() * (canvas.width - 60);
+        const ey = 40 + Math.random() * (canvas.height * 0.5);
+        const color = ['#ff4444', '#ff8800', '#ffcc00', '#ff00ff', '#00ffff'][Math.floor(Math.random() * 5)];
+        for (let j = 0; j < 6; j++) {
+          const ang = Math.random() * Math.PI * 2;
+          const spd = 30 + Math.random() * 80;
+          demoParticles.push({
+            x: ex, y: ey,
+            vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+            r: 1.5 + Math.random() * 3, color,
+            life: 0.3 + Math.random() * 0.4, maxLife: 0.7
+          });
+        }
+      }
+    }
+
+    function renderDemoBattle() {
+      ctx.save();
+      // Render demo bullets with glow
+      for (const b of demoBullets) {
+        ctx.globalAlpha = Math.min(1, b.life * 2);
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = b.color;
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+        ctx.fill();
+        // Trail
+        ctx.globalAlpha = Math.min(0.3, b.life);
+        ctx.beginPath();
+        ctx.arc(b.x - b.vx * 0.015, b.y - b.vy * 0.015, b.r * 0.7, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Render demo particles
+      for (const p of demoParticles) {
+        const a = p.life / (p.maxLife || 0.6);
+        ctx.globalAlpha = a * 0.8;
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = p.color;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * a, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Render demo ships
+      for (const ship of demoShips) {
+        ctx.globalAlpha = 0.6;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = ship.color;
+        ctx.fillStyle = ship.color;
+        ctx.beginPath();
+        ctx.moveTo(ship.x, ship.y - 14);
+        ctx.lineTo(ship.x - 10, ship.y + 10);
+        ctx.lineTo(ship.x + 10, ship.y + 10);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
     function updateMenu(dt) {
+      // Always update demo battle
+      updateDemoBattle(dt);
+
       // Title phase: press any key to continue
       if (menuPhase === 'title') {
         if (Object.values(keys).some(v => v === true)) {
@@ -4999,6 +5440,10 @@
         renderLeaderboard();
         return;
       }
+
+      // Dim overlay so menu text is readable over demo battle
+      ctx.fillStyle = 'rgba(10,10,26,0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // Animated title with pulsing glow
       const time = Date.now() / 1000;
@@ -5434,6 +5879,7 @@
 
       switch(gameState) {
         case STATE.MENU:
+          renderDemoBattle();
           renderMenu();
           break;
         case STATE.PLAYING:
