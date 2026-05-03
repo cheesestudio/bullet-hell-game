@@ -597,27 +597,24 @@
     ];
 
     function spawnPowerup(x, y) {
-      // Weight types based on wave - early game more SCORE/BOMB, later more POWER/SHIELD
       const rand = gameRandom();
       let type;
       if (waveCount <= 2) {
-        // Early: mostly SCORE, some BOMB, rare POWER/SHIELD
-        if (rand < 0.45) type = POWERUP_TYPES[1]; // SCORE
-        else if (rand < 0.75) type = POWERUP_TYPES[2]; // BOMB
-        else if (rand < 0.88) type = POWERUP_TYPES[0]; // POWER
+        // Early: prioritize POWER so player can get spread quickly
+        if (rand < 0.40) type = POWERUP_TYPES[0]; // POWER
+        else if (rand < 0.70) type = POWERUP_TYPES[1]; // SCORE
+        else if (rand < 0.88) type = POWERUP_TYPES[2]; // BOMB
         else type = POWERUP_TYPES[4]; // SHIELD
       } else if (waveCount <= 5) {
-        // Mid: mix of all
-        if (rand < 0.35) type = POWERUP_TYPES[1]; // SCORE
-        else if (rand < 0.6) type = POWERUP_TYPES[2]; // BOMB
-        else if (rand < 0.8) type = POWERUP_TYPES[0]; // POWER
+        if (rand < 0.35) type = POWERUP_TYPES[0]; // POWER
+        else if (rand < 0.55) type = POWERUP_TYPES[1]; // SCORE
+        else if (rand < 0.75) type = POWERUP_TYPES[2]; // BOMB
         else type = POWERUP_TYPES[4]; // SHIELD
       } else {
-        // Later: more POWER, SHIELD, LIFE
-        if (rand < 0.25) type = POWERUP_TYPES[1]; // SCORE
-        else if (rand < 0.45) type = POWERUP_TYPES[2]; // BOMB
-        else if (rand < 0.65) type = POWERUP_TYPES[0]; // POWER
-        else if (rand < 0.8) type = POWERUP_TYPES[4]; // SHIELD
+        if (rand < 0.30) type = POWERUP_TYPES[0]; // POWER
+        else if (rand < 0.50) type = POWERUP_TYPES[1]; // SCORE
+        else if (rand < 0.68) type = POWERUP_TYPES[2]; // BOMB
+        else if (rand < 0.82) type = POWERUP_TYPES[4]; // SHIELD
         else type = POWERUP_TYPES[3]; // LIFE
       }
       powerups.push({
@@ -667,6 +664,8 @@
         collector.power = Math.min(collector.power + 1, collector.maxPower);
         spawnSparkle(collector.x, collector.y, '#ff0066');
         triggerScreenFlash(0.3, '#ff0066');
+        const spreadNames = ['SINGLE', 'DOUBLE', 'TRIPLE', 'QUAD', 'MAX'];
+        spawnScorePopup(collector.x, collector.y - 20, `SPREAD UP! ${spreadNames[collector.power]}`);
       } else if (type.name === 'SCORE') {
         score += 500;
         spawnSparkle(collector.x, collector.y, '#ffcc00');
@@ -4216,6 +4215,14 @@
       ctx.fillText(`WEAPON: ${WEAPON_NAMES[currentWeapon]}`, 20, 125);
       ctx.shadowBlur = 0;
 
+      // Weapon spread level indicator
+      const spreadLv = player.power;
+      const spreadMax = player.maxPower;
+      const spreadLabels = ['SINGLE', 'DOUBLE', 'TRIPLE', 'QUAD', 'MAX'];
+      ctx.fillStyle = spreadLv >= 2 ? '#00ffff' : spreadLv >= 1 ? '#00ccff' : '#888';
+      ctx.font = '10px monospace';
+      ctx.fillText(`SPREAD: ${spreadLabels[spreadLv]}  PWR ${spreadLv}/${spreadMax}`, 20, 137);
+
       // Kill progress bar (toward next weapon switch)
       const killW = 80, killH = 6;
       const killProg = killCount / KILLS_PER_WEAPON;
@@ -5302,7 +5309,11 @@
 
         // Main text with color based on value
         let color = '#ffff00';
-        if (p.value >= 100) color = '#ff00ff';
+        let text = `+${p.value}`;
+        if (typeof p.value === 'string') {
+          color = '#ff0066';
+          text = p.value;
+        } else if (p.value >= 100) color = '#ff00ff';
         else if (p.value >= 50) color = '#ff6600';
         else if (p.value >= 20) color = '#00ff00';
 
@@ -5312,7 +5323,7 @@
         ctx.textAlign = 'center';
         ctx.shadowBlur = 15;
         ctx.shadowColor = color;
-        ctx.fillText(`+${p.value}`, p.x, p.y);
+        ctx.fillText(text, p.x, p.y);
 
         // Small sparkle effect
         if (p.life > 0.3) {
